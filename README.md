@@ -1,1 +1,5 @@
 # mixplat
+## Install
+```
+pip install .
+```
