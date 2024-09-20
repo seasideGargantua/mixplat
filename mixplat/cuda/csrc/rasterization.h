@@ -41,6 +41,7 @@ __global__ void rasterize_forward_kernel(
     const float2* __restrict__ xys,
     const float3* __restrict__ conics,
     const float3* __restrict__ colors,
+    const float* __restrict__ depths,
     const float* __restrict__ opacities,
     float* __restrict__ final_Ts,
     int* __restrict__ final_index,
@@ -76,5 +77,5 @@ __global__ void rasterize_backward_kernel(
     float3* __restrict__ v_conic,
     float3* __restrict__ v_rgb,
     float* __restrict__ v_opacity,
-    float* __restrict__ v_invdepth
+    float* __restrict__ v_depth
 );

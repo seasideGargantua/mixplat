@@ -105,13 +105,14 @@ __global__ void rasterize_forward_kernel(
     const dim3 tile_bounds,
     const dim3 img_size,
     const bool return_invdepth,
-    const float* interp_3ts,
+    const float* interp_ts,
 	const int* kids,
     const int32_t* __restrict__ gaussian_ids_sorted,
     const int2* __restrict__ tile_bins,
     const float2* __restrict__ xys,
     const float3* __restrict__ conics,
     const float3* __restrict__ colors,
+    const float* __restrict__ depths,
     const float* __restrict__ opacities,
     float* __restrict__ final_Ts,
     int* __restrict__ final_index,
@@ -149,7 +150,7 @@ __global__ void rasterize_forward_kernel(
     __shared__ int32_t id_batch[MAX_BLOCK_SIZE];
     __shared__ float3 xy_opacity_batch[MAX_BLOCK_SIZE];
     __shared__ float3 conic_batch[MAX_BLOCK_SIZE];
-    __shared__ float2 interp_ts_batch[BLOCK_SIZE];
+    __shared__ float2 interp_ts_batch[MAX_BLOCK_SIZE];
 
     // current visibility left to render
     float T = 1.f;
@@ -205,9 +206,9 @@ __global__ void rasterize_forward_kernel(
             int32_t g = id_batch[t];
             if (do_interp)
 			{
-				float2 interp = interp_ts[t];
+				float2 interp = interp_ts_batch[t];
 				float kidsqrt_alpha = 1.0f - __powf(1.0f - raw_alpha, interp.y);
-				alpha = interp.x * my_alpha + (1.0f - interp.x) * kidsqrt_alpha;
+				alpha = interp.x * raw_alpha + (1.0f - interp.x) * kidsqrt_alpha;
 			}
 			else
 			{
@@ -233,7 +234,7 @@ __global__ void rasterize_forward_kernel(
             pix_out.y = pix_out.y + c.y * vis;
             pix_out.z = pix_out.z + c.z * vis;
 
-            if(return_invdepth)expected_invdepth += (1 / depths[collected_id[j]]) * vis;
+            if(return_invdepth) expected_invdepth += (1 / depths[g]) * vis;
 
             T = next_T;
             cur_idx = batch_start + t;
@@ -281,7 +282,7 @@ __global__ void rasterize_backward_kernel(
     float3* __restrict__ v_conic,
     float3* __restrict__ v_rgb,
     float* __restrict__ v_opacity,
-    float* __restrict__ v_invdepth
+    float* __restrict__ v_depth
 ) {
     auto block = cg::this_thread_block();
     int32_t tile_id =
@@ -323,7 +324,7 @@ __global__ void rasterize_backward_kernel(
     // df/d_out for this pixel
     const float3 v_out = v_output[pix_id];
     const float v_out_alpha = v_output_alpha[pix_id];
-    const float v_out_invdepth;
+    float v_out_invdepth;
     float3 accum_rec = { 0.f, 0.f, 0.f };
 	float accum_invdepth_rec = 0.f;
     if (return_invdepth){
@@ -393,14 +394,13 @@ __global__ void rasterize_backward_kernel(
                 vis = __expf(-sigma);
                 float tmp_alpha = opac * vis;
                 nullalpha = tmp_alpha > 0.99f;
-                float raw_alpha = min(0.99f, tmp_alpha)
-			    float interp, frac;
+                float raw_alpha = min(0.99f, tmp_alpha);
                 if (do_interp)
                 {
-                    int global_id = id_batch[t]
-                    interp = interp_ts[global_id];
+                    int global_id = id_batch[t];
+                    float interp = interp_ts[global_id];
 
-                    frac =  1.0f / kids[global_id];
+                    float frac =  1.0f / kids[global_id];
                     float kidsqrt_alpha = 1.0f - pow(1.0f - raw_alpha, frac);
                     alpha = interp * raw_alpha + (1.0f - interp) * kidsqrt_alpha;
                 }
@@ -422,6 +422,7 @@ __global__ void rasterize_backward_kernel(
             float2 v_xy_local = {0.f, 0.f};
             float v_opacity_local = 0.f;
             float v_invdepth_local = 0.f;
+            float v_depth_local = 0.f;
             //initialize everything to 0, only set if the lane is valid
             if(valid){
                 // compute the current T for this gaussian
@@ -458,6 +459,7 @@ __global__ void rasterize_backward_kernel(
                 last_invdepth = invd;
                 v_alpha += (invd - accum_invdepth_rec) * v_out_invdepth;
                 v_invdepth_local = fac * v_out_invdepth;
+                v_depth_local = -v_invdepth_local*invd*invd;
                 }
                 
                 v_alpha *= T;
@@ -486,7 +488,7 @@ __global__ void rasterize_backward_kernel(
             warpSum3(v_conic_local, warp);
             warpSum2(v_xy_local, warp);
             warpSum(v_opacity_local, warp);
-            if (return_invdepth) warpSum(v_out_invdepth, warp);
+            if (return_invdepth) warpSum(v_depth_local, warp);
             if (warp.thread_rank() == 0) {
                 int32_t g = id_batch[t];
                 float* v_rgb_ptr = (float*)(v_rgb);
@@ -507,10 +509,10 @@ __global__ void rasterize_backward_kernel(
 
                 // Propagate gradients from inverse depth to alphaas and
                 // per Gaussian inverse depths
-                if (dL_dinvdepths)
+                if (return_invdepth)
                 {
-                float* v_invdepth_ptr = (float*)(v_invdepth);
-                atomicAdd(v_invdepth_ptr + g, v_invdepth_local);
+                float* v_depth_ptr = (float*)(v_depth);
+                atomicAdd(v_depth_ptr + g, v_depth_local);
                 }
 
             }

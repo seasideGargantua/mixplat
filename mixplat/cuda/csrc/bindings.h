@@ -202,8 +202,11 @@ rasterize_forward_tensor(
     const torch::Tensor &xys,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
+    const torch::Tensor &depths,
     const torch::Tensor &opacities,
-    const torch::Tensor &background
+    const torch::Tensor &background,
+    const torch::Tensor &interp_weights,
+    const torch::Tensor &kid_nodes
 );
 
 std::tuple<
@@ -218,11 +221,14 @@ rasterize_backward_tensor(
     const unsigned img_width,
     const unsigned block_width,
     const bool return_invdepth,
+    const torch::Tensor &interp_weights,
+    const torch::Tensor &kid_nodes,
     const torch::Tensor &gaussians_ids_sorted,
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
+    const torch::Tensor &depths,
     const torch::Tensor &opacities,
     const torch::Tensor &background,
     const torch::Tensor &final_Ts,

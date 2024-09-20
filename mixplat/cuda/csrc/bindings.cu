@@ -504,8 +504,11 @@ rasterize_forward_tensor(
     const torch::Tensor &xys,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
+    const torch::Tensor &depths,
     const torch::Tensor &opacities,
-    const torch::Tensor &background
+    const torch::Tensor &background,
+    const torch::Tensor &interp_weights,
+    const torch::Tensor &kid_nodes
 ) {
     DEVICE_GUARD(xys);
     CHECK_INPUT(gaussian_ids_sorted);
@@ -539,7 +542,7 @@ rasterize_forward_tensor(
         {img_height, img_width, channels}, xys.options().dtype(torch::kFloat32)
     );
     torch::Tensor out_invdepth = torch::zeros(
-        {img_height, img_width, 0}, xys.options().dtype(torch::kFloat32)
+        {img_height, img_width}, xys.options().dtype(torch::kFloat32)
     );
     torch::Tensor final_Ts = torch::zeros(
         {img_height, img_width}, xys.options().dtype(torch::kFloat32)
@@ -552,12 +555,14 @@ rasterize_forward_tensor(
         tile_bounds_dim3,
         img_size_dim3,
         return_invdepth,
-        
+        interp_weights.contiguous().data_ptr<float>(),
+        kid_nodes.contiguous().data_ptr<int>(),
         gaussian_ids_sorted.contiguous().data_ptr<int32_t>(),
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
+        depths.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),
         final_Ts.contiguous().data_ptr<float>(),
         final_idx.contiguous().data_ptr<int>(),
@@ -581,11 +586,14 @@ rasterize_backward_tensor(
     const unsigned img_width,
     const unsigned block_width,
     const bool return_invdepth,
+    const torch::Tensor &interp_weights,
+    const torch::Tensor &kid_nodes,
     const torch::Tensor &gaussians_ids_sorted,
     const torch::Tensor &tile_bins,
     const torch::Tensor &xys,
     const torch::Tensor &conics,
     const torch::Tensor &colors,
+    const torch::Tensor &depths,
     const torch::Tensor &opacities,
     const torch::Tensor &background,
     const torch::Tensor &final_Ts,
@@ -621,17 +629,20 @@ rasterize_backward_tensor(
     torch::Tensor v_colors =
         torch::zeros({num_points, channels}, xys.options());
     torch::Tensor v_opacity = torch::zeros({num_points, 1}, xys.options());
-    torch::Tensor v_invdepth = torch::zeros({num_points, 1}, xys.options());
+    torch::Tensor v_depth = torch::zeros({num_points}, xys.options());
 
     rasterize_backward_kernel<<<tile_bounds, block>>>(
         tile_bounds,
         img_size,
         return_invdepth,
+        interp_weights.contiguous().data_ptr<float>(),
+        kid_nodes.contiguous().data_ptr<int>(),
         gaussians_ids_sorted.contiguous().data_ptr<int>(),
         (int2 *)tile_bins.contiguous().data_ptr<int>(),
         (float2 *)xys.contiguous().data_ptr<float>(),
         (float3 *)conics.contiguous().data_ptr<float>(),
         (float3 *)colors.contiguous().data_ptr<float>(),
+        depths.contiguous().data_ptr<float>(),
         opacities.contiguous().data_ptr<float>(),
         *(float3 *)background.contiguous().data_ptr<float>(),
         final_Ts.contiguous().data_ptr<float>(),
@@ -643,8 +654,8 @@ rasterize_backward_tensor(
         (float3 *)v_conic.contiguous().data_ptr<float>(),
         (float3 *)v_colors.contiguous().data_ptr<float>(),
         v_opacity.contiguous().data_ptr<float>(),
-        v_invdepth.contiguous().data_ptr<float>()
+        v_depth.contiguous().data_ptr<float>()
     );
 
-    return std::make_tuple(v_xy, v_conic, v_colors, v_opacity, v_invdepth);
+    return std::make_tuple(v_xy, v_conic, v_colors, v_opacity, v_depth);
 }

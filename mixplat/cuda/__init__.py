@@ -11,8 +11,6 @@ def _make_lazy_cuda_func(name: str) -> Callable:
     return call_cuda
 
 
-nd_rasterize_forward = _make_lazy_cuda_func("nd_rasterize_forward")
-nd_rasterize_backward = _make_lazy_cuda_func("nd_rasterize_backward")
 rasterize_forward = _make_lazy_cuda_func("rasterize_forward")
 rasterize_backward = _make_lazy_cuda_func("rasterize_backward")
 compute_3d_covariance_forward = _make_lazy_cuda_func("compute_3d_covariance_forward")

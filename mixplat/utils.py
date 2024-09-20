@@ -1,5 +1,5 @@
 import torch
-import diff_423dgs.cuda as _C
+import mixplat.cuda as _C
 
 #---------------------------------------------------------------------#
 # Define the C++/CUDA Gaussians rasterization utils API               #

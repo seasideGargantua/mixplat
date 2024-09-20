@@ -1,5 +1,5 @@
 import torch
-import diff_423dgs.cuda as _C
+import mixplat.cuda as _C
 from .utils import compute_cumulative_intersects, bin_and_sort_gaussians
 
 #------------------------------------------------------------#
@@ -18,6 +18,8 @@ def rasterize_gaussians(
     img_width,
     block_width,
     background = None,
+    interp_weights = None,
+    kid_nodes = None,
     return_alpha = False,
     return_invdepth = False,
 ):
@@ -62,6 +64,11 @@ def rasterize_gaussians(
             colors.shape[-1], dtype=torch.float32, device=colors.device
         )
 
+    if interp_weights is None:
+        interp_weights = torch.tensor([], device=xys.device)
+    if kid_nodes is None:
+        kid_nodes = torch.tensor([], device=xys.device, dtype=torch.int32)
+
     if xys.ndimension() != 2 or xys.size(1) != 2:
         raise ValueError("xys must have dimensions (N, 2)")
 
@@ -80,7 +87,10 @@ def rasterize_gaussians(
         img_width,
         block_width,
         background.contiguous(),
+        interp_weights.contiguous(),
+        kid_nodes.contiguous(),
         return_alpha,
+        return_invdepth,
     )
 
 class _RasterizeGaussians(torch.autograd.Function):
@@ -100,6 +110,8 @@ class _RasterizeGaussians(torch.autograd.Function):
         img_width,
         block_width,
         background = None,
+        interp_weights = None,
+        kid_nodes = None,
         return_alpha = False,
         return_invdepth = False,
     ):
@@ -146,13 +158,17 @@ class _RasterizeGaussians(torch.autograd.Function):
                 tile_bounds,
                 block,
                 img_size,
+                return_invdepth,
                 gaussian_ids_sorted,
                 tile_bins,
                 xys,
                 conics,
                 colors,
+                depths,
                 opacity,
                 background,
+                interp_weights,
+                kid_nodes,
             )
 
         ctx.img_width = img_width
@@ -171,6 +187,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             background,
             final_Ts,
             final_idx,
+            interp_weights,
+            kid_nodes,
         )
         out = (out_img,)
         if return_alpha:
@@ -178,6 +196,10 @@ class _RasterizeGaussians(torch.autograd.Function):
             out += (out_alpha,)
         if return_invdepth:
             out += (out_invdepth,)
+
+        if len(out) == 1:
+            out = out[0]
+
         return out
 
     @staticmethod
@@ -202,6 +224,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             background,
             final_Ts,
             final_idx,
+            interp_weights,
+            kid_nodes,
         ) = ctx.saved_tensors
 
         if num_intersects < 1:
@@ -212,16 +236,19 @@ class _RasterizeGaussians(torch.autograd.Function):
             v_depth = torch.zeros_like(depths)
         else:
             rasterize_fn = _C.rasterize_backward
-            v_xy, v_conic, v_colors, v_opacity, v_invdepth = rasterize_fn(
+            v_xy, v_conic, v_colors, v_opacity, v_depth = rasterize_fn(
                 img_height,
                 img_width,
                 ctx.block_width,
                 ctx.return_invdepth,
+                interp_weights,
+                kid_nodes,
                 gaussian_ids_sorted,
                 tile_bins,
                 xys,
                 conics,
                 colors,
+                depths,
                 opacity,
                 background,
                 final_Ts,
@@ -230,7 +257,6 @@ class _RasterizeGaussians(torch.autograd.Function):
                 v_out_alpha,
                 v_out_invdepth,
             )
-            v_depth = - v_invdepth / (depths*depths+1e-6)
 
         return (
             v_xy,  # xys
@@ -244,5 +270,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             None,  # img_width
             None,  # block_width
             None,  # background
+            None,  # interp_weights
+            None,  # kid_nodes
             None,  # return_alpha
+            None,  # return_invdepth
         )
