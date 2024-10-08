@@ -1,5 +1,6 @@
 import torch
 import mixplat.cuda as _C
+import math
 
 #---------------------------------------------------------------------#
 # Define the C++/CUDA Gaussians rasterization utils API               #
@@ -144,3 +145,35 @@ def bin_and_sort_gaussians(
     tile_bins = get_tile_bin_edges(num_intersects, isect_ids_sorted, tile_bounds)
     return isect_ids, gaussian_ids, isect_ids_sorted, gaussian_ids_sorted, tile_bins
 
+class RelocationOp:
+    """Relocation operator for opacity and scale values.
+
+    This operator takes in the old opacity and scale values and returns the new values after relocation.
+
+    Note:
+        This class is not differentiable to any input.
+
+    Args:
+        opacity_old (Tensor): old opacity values.
+        scale_old (Tensor): old scale values.
+        scale_t_old (Tensor, Optional): old scale t values.
+        N (Tensor): number of relocations to perform.
+
+    Returns:
+        A tuple of {Tensor, Tensor}:
+        - **opacity_new** (Tensor): new opacity values.
+        - **scale_new** (Tensor): new scale values.
+        - **scale_t_new** (Tensor, Optional): new scale t values.
+    """
+    def __init__(self, N_max=51):
+        self.N_max = 51
+        self.binoms = torch.zeros((N_max, N_max)).float().cuda()
+        for n in range(N_max):
+            for k in range(n+1):
+                self.binoms[n, k] = math.comb(n, k)
+
+    def compute_relocation(self, opacity_old, scale_old, N, scale_t_old=None):
+        if scale_t_old is None:
+            scale_t_old = scale_old.clone()[:,0]
+        N.clamp_(min=1, max=self.N_max-1)
+        return _C.compute_relocation(opacity_old, scale_old, scale_t_old, N, self.binoms, self.N_max)

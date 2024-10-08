@@ -55,3 +55,19 @@ __global__ void computeCov3D_conditional_bwd_kernel(
     float* dL_dscales_t, 
     glm::vec4* dL_drots, 
     glm::vec4* dL_drots_r);
+
+/****************************************************************************
+ * Compute relocation in 3DGS MCMC
+ ****************************************************************************/
+
+__global__ void compute_relocation_kernel(
+    int P, 
+    float* opacity_old, 
+    float* scale_old,
+    float* scale_t_old,
+    int* N, 
+    float* binoms, 
+    int n_max, 
+    float* opacity_new, 
+    float* scale_new,
+    float* scale_t_new);

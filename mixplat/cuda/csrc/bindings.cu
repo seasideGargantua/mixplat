@@ -282,6 +282,48 @@ computeCov3D_conditional_bwd_tensor(
 }
 
 /****************************************************************************
+ * Compute relocation in 3DGS MCMC
+ ****************************************************************************/
+
+std::tuple<torch::Tensor, 
+          torch::Tensor,
+          torch::Tensor> 
+compute_relocation_tensor(
+	torch::Tensor& opacity_old,
+	torch::Tensor& scale_old,
+    torch::Tensor& scale_t_old,
+	torch::Tensor& N,
+	torch::Tensor& binoms,
+	const int n_max)
+{
+	const int P = opacity_old.size(0);
+  
+	torch::Tensor final_opacity = torch::full({P}, 0, opacity_old.options().dtype(torch::kFloat32));
+	torch::Tensor final_scale = torch::full({3 * P}, 0, scale_old.options().dtype(torch::kFloat32));
+    torch::Tensor final_scale_t = torch::full({P}, 0, scale_t_old.options().dtype(torch::kFloat32));
+
+	if(P != 0)
+	{
+		compute_relocation_kernel<<<
+        (P + N_THREADS - 1) / N_THREADS,
+        N_THREADS>>>(
+            P,
+			opacity_old.contiguous().data<float>(),
+			scale_old.contiguous().data<float>(),
+            scale_t_old.contiguous().data<float>(),
+			N.contiguous().data<int>(),
+			binoms.contiguous().data<float>(),
+			n_max,
+			final_opacity.contiguous().data<float>(),
+			final_scale.contiguous().data<float>(),
+            final_scale_t.contiguous().data<float>());
+	}
+
+	return std::make_tuple(final_opacity, final_scale, final_scale_t);
+
+}
+
+/****************************************************************************
  * Projection of 3D Gaussians
  ****************************************************************************/
 
@@ -659,3 +701,4 @@ rasterize_backward_tensor(
 
     return std::make_tuple(v_xy, v_conic, v_colors, v_opacity, v_depth);
 }
+

@@ -88,6 +88,21 @@ std::tuple<torch::Tensor, torch::Tensor> computeCov3D_bwd_tensor(
 );
 
 /****************************************************************************
+ * Compute relocation in 3DGS MCMC
+ ****************************************************************************/
+
+std::tuple<torch::Tensor, 
+          torch::Tensor,
+          torch::Tensor> 
+compute_relocation_tensor(
+	torch::Tensor& opacity_old,
+	torch::Tensor& scale_old,
+    torch::Tensor& scale_t_old,
+	torch::Tensor& N,
+	torch::Tensor& binoms,
+	const int n_max);
+
+/****************************************************************************
  * Projection of 3D Gaussians
  ****************************************************************************/
 
