@@ -131,6 +131,12 @@ class _RasterizeGaussians(torch.autograd.Function):
                 torch.ones(img_height, img_width, colors.shape[-1], device=xys.device)
                 * background
             )
+            out_alpha = (
+                torch.zeros(img_height, img_width, device=xys.device)
+            )
+            out_invdepth = (
+                torch.ones(img_height, img_width, device=xys.device)
+            )
             gaussian_ids_sorted = torch.zeros(0, 1, device=xys.device)
             tile_bins = torch.zeros(0, 2, device=xys.device)
             final_Ts = torch.zeros(img_height, img_width, device=xys.device)
