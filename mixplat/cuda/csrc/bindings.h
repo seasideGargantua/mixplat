@@ -131,6 +131,7 @@ project_gaussians_forward_tensor(
 std::tuple<
     torch::Tensor,
     torch::Tensor,
+    torch::Tensor,
     torch::Tensor>
 project_gaussians_backward_tensor(
     const int num_points,

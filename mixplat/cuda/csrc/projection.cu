@@ -112,7 +112,8 @@ __global__ void project_gaussians_backward_kernel(
     const float* __restrict__ v_compensation,
     float3* __restrict__ v_cov2d,
     float* __restrict__ v_cov3d,
-    float3* __restrict__ v_mean3d
+    float3* __restrict__ v_mean3d,
+    float* __restrict__ v_viewmat
 ) {
     unsigned idx = cg::this_grid().thread_rank(); // idx of thread within grid
     if (idx >= num_points || radii[idx] <= 0) {
@@ -139,6 +140,9 @@ __global__ void project_gaussians_backward_kernel(
     cov2d_to_conic_vjp(conics[idx], v_conic[idx], v_cov2d[idx]);
     cov2d_to_compensation_vjp(compensation[idx], conics[idx], v_compensation[idx], v_cov2d[idx]);
     // get v_cov3d (and v_mean3d contribution)
+    glm::mat3 v_Rot(0.f);
+    glm::vec3 v_Trans(0.f);
+
     project_cov3d_ewa_vjp(
         p_world,
         &(cov3d[6 * idx]),
@@ -147,8 +151,18 @@ __global__ void project_gaussians_backward_kernel(
         fy,
         v_cov2d[idx],
         v_mean3d[idx],
-        &(v_cov3d[6 * idx])
-    );
+        &(v_cov3d[6 * idx]),
+        v_Rot,
+        v_Trans);
+
+    if (v_viewmat != nullptr) {
+        for (uint32_t i = 0; i < 3; i++) { // rows
+            for (uint32_t j = 0; j < 3; j++) { // cols
+                atomicAdd(v_viewmat + i * 4 + j, v_Rot[j][i]);
+            }
+            atomicAdd(v_viewmat + i * 4 + 3, v_Trans[i]);
+        }
+    }
 }
 
 /****************************************************************************
@@ -224,7 +238,9 @@ __device__ void project_cov3d_ewa_vjp(
     const float fy,
     const float3& __restrict__ v_cov2d,
     float3& __restrict__ v_mean3d,
-    float* __restrict__ v_cov3d
+    float* __restrict__ v_cov3d,
+    glm::mat3& __restrict__ v_Rot,
+    glm::vec3& __restrict__ v_Trans
 ) {
     // viewmat is row major, glm is column major
     // upper 3x3 submatrix
@@ -294,4 +310,18 @@ __device__ void project_cov3d_ewa_vjp(
     v_mean3d.x += (float)glm::dot(v_t, W[0]);
     v_mean3d.y += (float)glm::dot(v_t, W[1]);
     v_mean3d.z += (float)glm::dot(v_t, W[2]);
+
+    // for D = W * X, G = df/dD
+    // df/dW = G * XT, df/dX = WT * G
+    glm::vec3 mean3d_gl = glm::vec3(mean3d.x, mean3d.y, mean3d.z);
+    v_Rot += glm::outerProduct(v_t, mean3d_gl);
+    v_Trans += v_t;
+
+    // for D = W * X * WT, G = df/dD
+    // df/dX = WT * G * W
+    // df/dW
+    // = G * (X * WT)T + ((W * X)T * G)T
+    // = G * W * XT + (XT * WT * G)T
+    // = G * W * XT + GT * W * X
+    v_Rot += v_V * W * glm::transpose(V)+glm::transpose(v_V) * W * V;
 }

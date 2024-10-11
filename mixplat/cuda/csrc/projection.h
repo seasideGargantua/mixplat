@@ -43,7 +43,8 @@ __global__ void project_gaussians_backward_kernel(
     const float* __restrict__ v_compensation,
     float3* __restrict__ v_cov2d,
     float* __restrict__ v_cov3d,
-    float3* __restrict__ v_mean3d
+    float3* __restrict__ v_mean3d,
+    float* __restrict__ v_viewmat
 );
 
 /****************************************************************************
@@ -70,5 +71,7 @@ __device__ void project_cov3d_ewa_vjp(
     const float fy,
     const float3& __restrict__ v_cov2d,
     float3& __restrict__ v_mean3d,
-    float* __restrict__ v_cov3d
+    float* __restrict__ v_cov3d,
+    glm::mat3& __restrict__ v_Rot,
+    glm::vec3& __restrict__ v_Trans
 );

@@ -365,7 +365,7 @@ class _ProjectGaussians(torch.autograd.Function):
             compensation,
         ) = ctx.saved_tensors
 
-        (v_cov2d, v_cov3d, v_mean3d) = _C.project_gaussians_backward(
+        (v_cov2d, v_cov3d, v_mean3d, v_viewmat) = _C.project_gaussians_backward(
             ctx.num_points,
             means3d,
             viewmat,
@@ -391,8 +391,8 @@ class _ProjectGaussians(torch.autograd.Function):
             v_mean3d,
             # cov3d: Float[Tensor, "*batch 3 3"],
             v_cov3d,
-            # viewmat: Float[Tensor, "4 4"],
-            None,
+            # viewmat: Float[Tensor, "3 4"],
+            v_viewmat,
             # fx: float,
             None,
             # fy: float,

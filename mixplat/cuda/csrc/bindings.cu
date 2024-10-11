@@ -403,6 +403,7 @@ project_gaussians_forward_tensor(
 std::tuple<
     torch::Tensor,
     torch::Tensor,
+    torch::Tensor,
     torch::Tensor>
 project_gaussians_backward_tensor(
     const int num_points,
@@ -437,6 +438,8 @@ project_gaussians_backward_tensor(
         torch::zeros({num_points, 6}, means3d.options().dtype(torch::kFloat32));
     torch::Tensor v_mean3d =
         torch::zeros({num_points, 3}, means3d.options().dtype(torch::kFloat32));
+    torch::Tensor v_viewmat =
+        torch::zeros({3, 4}, means3d.options().dtype(torch::kFloat32));
 
     project_gaussians_backward_kernel<<<
         (num_points + N_THREADS - 1) / N_THREADS,
@@ -457,10 +460,11 @@ project_gaussians_backward_tensor(
         // Outputs.
         (float3 *)v_cov2d.contiguous().data_ptr<float>(),
         v_cov3d.contiguous().data_ptr<float>(),
-        (float3 *)v_mean3d.contiguous().data_ptr<float>()
+        (float3 *)v_mean3d.contiguous().data_ptr<float>(),
+        v_viewmat.contiguous().data_ptr<float>()
     );
 
-    return std::make_tuple(v_cov2d, v_cov3d, v_mean3d);
+    return std::make_tuple(v_cov2d, v_cov3d, v_mean3d, v_viewmat);
 }
 
 /****************************************************************************
