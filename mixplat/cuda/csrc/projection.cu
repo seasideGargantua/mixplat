@@ -7,6 +7,20 @@
 #include <cuda_fp16.h>
 namespace cg = cooperative_groups;
 
+inline __device__ void warpSum3x3(glm::mat3& val, cg::thread_block_tile<32>& tile){
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            val[i][j] = cg::reduce(tile, val[i][j], cg::plus<float>());
+        }
+    }
+}
+
+inline __device__ void warpSum3(glm::vec3& val, cg::thread_block_tile<32>& tile){
+    for (int i = 0; i < 3; i++) {
+        val[i] = cg::reduce(tile, val[i], cg::plus<float>());
+    }
+}
+
 /****************************************************************************
  * Projection of 3D Gaussians forward part
  ****************************************************************************/
@@ -115,6 +129,7 @@ __global__ void project_gaussians_backward_kernel(
     float3* __restrict__ v_mean3d,
     float* __restrict__ v_viewmat
 ) {
+    auto block = cg::this_thread_block();
     unsigned idx = cg::this_grid().thread_rank(); // idx of thread within grid
     if (idx >= num_points || radii[idx] <= 0) {
         return;
@@ -156,11 +171,16 @@ __global__ void project_gaussians_backward_kernel(
         v_Trans);
 
     if (v_viewmat != nullptr) {
-        for (uint32_t i = 0; i < 3; i++) { // rows
-            for (uint32_t j = 0; j < 3; j++) { // cols
-                atomicAdd(v_viewmat + i * 4 + j, v_Rot[j][i]);
+        cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+        warpSum3x3(v_Rot, warp);
+        warpSum3(v_Trans, warp);
+        if (warp.thread_rank() == 0) {
+            for (uint32_t i = 0; i < 3; i++) { // rows
+                for (uint32_t j = 0; j < 3; j++) { // cols
+                    atomicAdd(v_viewmat + i * 4 + j, v_Rot[j][i]);
+                }
+                atomicAdd(v_viewmat + i * 4 + 3, v_Trans[i]);
             }
-            atomicAdd(v_viewmat + i * 4 + 3, v_Trans[i]);
         }
     }
 }
@@ -323,5 +343,5 @@ __device__ void project_cov3d_ewa_vjp(
     // = G * (X * WT)T + ((W * X)T * G)T
     // = G * W * XT + (XT * WT * G)T
     // = G * W * XT + GT * W * X
-    v_Rot += v_V * W * glm::transpose(V)+glm::transpose(v_V) * W * V;
+    v_Rot += v_V * glm::transpose(V) + glm::transpose(v_V) * V;
 }

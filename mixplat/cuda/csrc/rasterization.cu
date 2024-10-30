@@ -393,8 +393,8 @@ __global__ void rasterize_backward_kernel(
                                     conic.y * delta.x * delta.y;
                 vis = __expf(-sigma);
                 float tmp_alpha = opac * vis;
-                nullalpha = tmp_alpha > 0.99f;
-                float raw_alpha = min(0.99f, tmp_alpha);
+                nullalpha = tmp_alpha > 0.999f;
+                float raw_alpha = min(0.999f, tmp_alpha);
                 if (do_interp)
                 {
                     int global_id = id_batch[t];
