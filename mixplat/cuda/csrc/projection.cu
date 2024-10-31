@@ -334,8 +334,9 @@ __device__ void project_cov3d_ewa_vjp(
     // for D = W * X, G = df/dD
     // df/dW = G * XT, df/dX = WT * G
     glm::vec3 mean3d_gl = glm::vec3(mean3d.x, mean3d.y, mean3d.z);
-    v_Rot += glm::outerProduct(v_t, mean3d_gl);
-    v_Trans += v_t;
+    glm::vec3 v_mean_c = W*glm::vec3(v_mean3d.x, v_mean3d.y, v_mean3d.z);
+    v_Rot += glm::outerProduct(v_mean_c, mean3d_gl);
+    v_Trans += v_mean_c;
 
     // for D = W * X * WT, G = df/dD
     // df/dX = WT * G * W
@@ -343,5 +344,11 @@ __device__ void project_cov3d_ewa_vjp(
     // = G * (X * WT)T + ((W * X)T * G)T
     // = G * W * XT + (XT * WT * G)T
     // = G * W * XT + GT * W * X
-    v_Rot += v_V * glm::transpose(V) + glm::transpose(v_V) * V;
+    glm::mat3 v_cov_c = glm::mat3(
+        v_cov2d.x,        v_cov2d.y,        0.f,
+        v_cov2d.y,        v_cov2d.z,        0.f,
+        0.f,              0.f,              0.f
+    );
+    glm::mat3 v_V_c = glm::transpose(J) * v_cov * J;
+    v_Rot += v_V_c * W * glm::transpose(V) + glm::transpose(v_V_c) * W * V;
 }
