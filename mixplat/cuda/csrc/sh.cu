@@ -1,6 +1,7 @@
 #include <iostream>
 #include "sh.h"
 #include "auxiliary.h"
+#include "spherical_harmonics.cuh"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 namespace cg = cooperative_groups;
@@ -120,6 +121,24 @@ __global__ void compute_3dsh_fwd_kernel(
     );
 }
 
+__global__ void compute_3dsh_fast_fwd_kernel(const uint32_t N,
+									  const uint32_t M,
+                                      const uint32_t D,
+									  const glm::vec3* dir, 
+                                      const float* __restrict__ shs, // [N, M, 3]
+                                      float* __restrict__ colors        // [N, 3]
+) { 
+    // parallelize over N * 3
+    uint32_t idx = cg::this_grid().thread_rank();
+    if (idx >= N) {
+        return;
+    }
+    glm::vec3 result = sh_coeffs_to_color_fast(idx, D, M, shs, dir);
+    colors[idx * 3 + 0] = result.x;
+    colors[idx * 3 + 1] = result.y;
+    colors[idx * 3 + 2] = result.z;
+}
+
 /****************************************************************************
  * 3D Spherical Harmonics backward part
  ****************************************************************************/
@@ -236,6 +255,24 @@ __global__ void compute_3dsh_bwd_kernel(
     sh_coeffs_to_color_vjp(
         degrees_to_use, viewdirs[idx], &(v_colors[idx_col]), &(v_coeffs[idx_sh])
     );
+}
+
+__global__ void compute_3dsh_fast_bwd_kernel(const uint32_t N,
+									  const uint32_t M, 
+                                      const uint32_t D,
+									  const float* __restrict__ shs,    // [N, K, 3]
+									  const glm::vec3* __restrict__ dirs, 	// [N, 3]
+                                      const float* __restrict__ dL_dcolor, // [N, 3]
+									  float* __restrict__ dL_dsh,
+									  float* __restrict__ dL_ddir
+) {
+    // parallelize over N * 3
+    uint32_t idx = cg::this_grid().thread_rank();
+    if (idx >= N) {
+        return;
+    }
+    sh_coeffs_to_color_fast_vjp(idx, D, M, shs, dirs,
+		            (glm::vec3*)dL_dcolor, (glm::vec3*)dL_dsh, (glm::vec3*)dL_ddir);
 }
 
 /****************************************************************************

@@ -94,6 +94,73 @@ class _3DSphericalHarmonics(torch.autograd.Function):
             ),
         )
 
+def spherical_harmonics_3d_fast(
+    degrees_to_use: int,
+    viewdirs,
+    coeffs,
+):
+    """Compute spherical harmonics
+
+    Note:
+        This function is only differentiable to the input coeffs.
+
+    Args:
+        degrees_to_use (int): degree of SHs to use (<= total number available).
+        viewdirs (Tensor): viewing directions.
+        coeffs (Tensor): harmonic coefficients.
+
+    Returns:
+        The spherical harmonics.
+    """
+    assert coeffs.shape[-2] >= num_sh_bases(degrees_to_use)
+    return _3DSphericalHarmonicsFast.apply(
+        degrees_to_use, coeffs.contiguous(), viewdirs.contiguous()
+    )
+
+
+class _3DSphericalHarmonicsFast(torch.autograd.Function):
+    """Compute spherical harmonics
+
+    Args:
+        degrees_to_use (int): degree of SHs to use (<= total number available).
+        viewdirs (Tensor): viewing directions.
+        coeffs (Tensor): harmonic coefficients.
+    """
+
+    @staticmethod
+    def forward(
+        ctx, degree, shs, dirs
+    ):
+        num_points = shs.shape[0]
+        color = _C.spherical_harmonics_3d_fast_forward(
+            num_points, 
+            degree, 
+            shs, 
+            dirs
+        )
+        ctx.save_for_backward(shs, dirs)
+        ctx.num_points = num_points
+        ctx.degree = degree
+        return color
+
+    @staticmethod
+    def backward(ctx, dL_dcolors):
+        shs, dirs = ctx.saved_tensors
+        num_points = ctx.num_points
+        degree = ctx.degree
+        dL_dsh, dL_ddir = _C.spherical_harmonics_3d_fast_backward(
+                num_points,
+                degree,
+                shs,
+                dirs,
+                dL_dcolors
+            )
+        return (
+            None,
+            dL_dsh, 
+            dL_ddir,
+        )
+
 #------------------------------------------------------------#
 # Define the C++/CUDA 4d spherical harmonics class and API   #
 #------------------------------------------------------------#

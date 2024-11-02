@@ -72,6 +72,68 @@ torch::Tensor compute_3dsh_backward_tensor(
     return v_coeffs;
 }
 
+torch::Tensor compute_3dsh_fast_forward_tensor(
+    const unsigned num_points,
+    const unsigned D,
+    const torch::Tensor &shs,
+    const torch::Tensor &dirs
+) {
+    int M = 0;
+    if(shs.size(0) != 0)
+    {	
+        M = shs.size(1);
+    }
+    torch::Tensor colors = 
+        torch::zeros({num_points, 3}, shs.options().dtype(torch::kFloat32));  
+    compute_3dsh_fast_fwd_kernel<<<
+        (num_points + N_THREADS - 1) / N_THREADS,
+        N_THREADS>>>(
+        num_points,
+        M,
+        D,
+        (glm::vec3*)dirs.contiguous().data_ptr<float>(),
+        shs.contiguous().data_ptr<float>(),
+        colors.contiguous().data_ptr<float>()
+    );
+    return colors;
+}
+
+std::tuple<
+    torch::Tensor,
+    torch::Tensor>
+compute_3dsh_fast_backward_tensor(
+    const unsigned num_points,
+    const unsigned D,
+    const torch::Tensor &shs,
+    const torch::Tensor &dirs,
+    torch::Tensor &dL_dcolor
+) {
+    int M = 0;
+    if(shs.size(0) != 0)
+    {	
+        M = shs.size(1);
+    }
+    torch::Tensor dL_dsh =
+        torch::zeros({num_points, M, 3}, shs.options().dtype(torch::kFloat32));
+    torch::Tensor dL_ddir = 
+        torch::zeros({num_points, 3}, shs.options().dtype(torch::kFloat32));
+
+    
+    compute_3dsh_fast_bwd_kernel<<<
+        (num_points + N_THREADS - 1) / N_THREADS,
+        N_THREADS>>>(
+        num_points,
+        M,
+        D,
+        shs.contiguous().data_ptr<float>(),
+        (glm::vec3*)dirs.contiguous().data_ptr<float>(),
+        dL_dcolor.contiguous().data_ptr<float>(),
+        dL_dsh.contiguous().data_ptr<float>(),
+        dL_ddir.contiguous().data_ptr<float>()
+    );
+    return std::make_tuple(dL_dsh, dL_ddir);
+}
+
 /****************************************************************************
  * 4D Spherical Harmonics
  ****************************************************************************/

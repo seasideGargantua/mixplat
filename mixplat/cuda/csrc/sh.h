@@ -19,6 +19,14 @@ __global__ void compute_3dsh_fwd_kernel(
     float* __restrict__ colors
 );
 
+__global__ void compute_3dsh_fast_fwd_kernel(const uint32_t N,
+									  const uint32_t M,
+                                      const uint32_t D,
+									  const glm::vec3* dir, 
+                                      const float* __restrict__ shs, // [N, M, 3]
+                                      float* __restrict__ colors      // [N, 3]
+);
+
 __global__ void compute_3dsh_bwd_kernel(
     const unsigned num_points,
     const unsigned degree,
@@ -26,6 +34,16 @@ __global__ void compute_3dsh_bwd_kernel(
     const float3* __restrict__ viewdirs,
     const float* __restrict__ v_colors,
     float* __restrict__ v_coeffs
+);
+
+__global__ void compute_3dsh_fast_bwd_kernel(const uint32_t N,
+									  const uint32_t M, 
+                                      const uint32_t D,
+									  const float* __restrict__ shs,    // [N, K, 3]
+									  const glm::vec3* __restrict__ dirs, 	// [N, 3]
+                                      const float* __restrict__ dL_dcolor, // [N, 3]
+									  float* __restrict__ dL_dsh,
+									  float* __restrict__ dL_ddir
 );
 
 /****************************************************************************

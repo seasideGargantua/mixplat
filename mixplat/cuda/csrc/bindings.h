@@ -33,12 +33,30 @@ torch::Tensor compute_3dsh_forward_tensor(
     torch::Tensor &coeffs
 );
 
+torch::Tensor compute_3dsh_fast_forward_tensor(
+    const unsigned num_points,
+    const unsigned D,
+    const torch::Tensor &shs,
+    const torch::Tensor &dirs
+);
+
 torch::Tensor compute_3dsh_backward_tensor(
     const unsigned num_points,
     const unsigned degree,
     const unsigned degrees_to_use,
     torch::Tensor &viewdirs,
     torch::Tensor &v_colors
+);
+
+std::tuple<
+    torch::Tensor,
+    torch::Tensor>
+compute_3dsh_fast_backward_tensor(
+    const unsigned num_points,
+    const unsigned D,
+    const torch::Tensor &shs,
+    const torch::Tensor &dirs,
+    torch::Tensor &dL_dcolor
 );
 
 /****************************************************************************
