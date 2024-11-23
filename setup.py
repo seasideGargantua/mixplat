@@ -6,7 +6,7 @@ import sys
 
 from setuptools import find_packages, setup
 
-__version__ = None
+__version__ = "0.0.1"
 exec(open("mixplat/version.py", "r").read())
 
 BUILD_NO_CUDA = os.getenv("BUILD_NO_CUDA", "0") == "1"
@@ -94,6 +94,8 @@ def get_extensions():
 setup(
     name="mixplat",
     version=__version__,
+    author="seasideGargantua",
+    author_email="seasidegargantua@gmail.com",
     description=" Python package for differentiable rasterization of mixed gaussians",
     keywords="gaussian, splatting, cuda",
     python_requires=">=3.10",
