@@ -6,7 +6,7 @@ import sys
 
 from setuptools import find_packages, setup
 
-__version__ = "0.0.1"
+__version__ = None
 exec(open("mixplat/version.py", "r").read())
 
 BUILD_NO_CUDA = os.getenv("BUILD_NO_CUDA", "0") == "1"
