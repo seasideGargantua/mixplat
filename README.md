@@ -143,6 +143,47 @@ elif return_rgb and not return_alpha and not return_invdepth:
                 return_invdepth=False,
             )
 ```
+To render Gaussians with a hierarchical structure, you only need to add kid_nodes and interp_weights during the rasterization stage.
+```
+rendered_image, rendered_alpha = rasterize_gaussians(  # type: ignore
+                xys,
+                depths,
+                radii,
+                conics,
+                num_tiles_hit,
+                rgbs_all,
+                opacity_all,
+                H,
+                W,
+                16,
+                background=bg_color,
+                interp_weights=interpolation_weights,
+                kid_nodes=num_node_kids,
+                return_alpha=True,
+            )
+```
+## Coordinate
+Our coordinate system is the same as [Nerfstudio](https://github.com/nerfstudio-project/nerfstudio). If you are using the camera from 3dgs, please perform the following steps first.
+```
+R = torch.tensor(viewpoint_camera.R).float().cuda() # 3 x 3
+T = torch.tensor(viewpoint_camera.T).float().unsqueeze(1).cuda()  # 3 x 1
+w2c = torch.eye(4, device=R.device, dtype=R.dtype)
+w2c[:3, :3] = R.T
+w2c[:3, 3:4] = T
+c2w = w2c.inverse()
+c2w[0:3, 1:3] *= -1
+# flip the z and y axes to align with nerfstudio conventions
+R_edit = torch.diag(torch.tensor([1, -1, -1], dtype=torch.float32)).cuda()
+R_new = c2w[:3, :3] @ R_edit
+T_new = c2w[:3, 3:4]
+# analytic matrix inverse to get world2camera matrix
+R_inv = R_new.T
+T_inv = -R_inv @ T_new
+viewmat = torch.eye(4, device=R.device, dtype=R.dtype)
+viewmat[:3, :3] = R_inv
+viewmat[:3, 3:4] = T_inv
+```
+
 ## Credits
 Using the algorithm and improvements from:
 - [diff-gaussian-rasterization](https://github.com/graphdeco-inria/diff-gaussian-rasterization) for the main Gaussian Splatting algorithm.
