@@ -1,10 +1,12 @@
 import torch
+from torch import Tensor
 import mixplat.cuda as _C
-from .utils import compute_cumulative_intersects, bin_and_sort_gaussians, rasterize_to_indices_in_range
+from .utils import compute_cumulative_intersects, bin_and_sort_gaussians
+from typing import Tuple, Optional
 try:
-        from nerfacc import accumulate_along_rays, render_weight_from_alpha
-    except ImportError:
-        raise ImportError("Please install nerfacc package: pip install nerfacc")
+    from nerfacc import accumulate_along_rays, render_weight_from_alpha
+except ImportError:
+    raise ImportError("Please install nerfacc package: pip install nerfacc")
 
 #------------------------------------------------------------#
 # Define the C++/CUDA rasterization class and API            #
@@ -428,7 +430,7 @@ def _rasterize_to_pixels(
 
         # Find the M intersections between pixels and gaussians.
         # Each intersection corresponds to a tuple (gs_id, pixel_id, camera_id)
-        gs_ids, pixel_ids, camera_ids = rasterize_to_indices_in_range(
+        gs_ids, pixel_ids, camera_ids = _C.rasterize_to_indices_in_range(
             step,
             step + batch_per_iter,
             transmittances,

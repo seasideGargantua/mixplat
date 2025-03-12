@@ -1,4 +1,5 @@
 import torch
+from torch import Tensor
 import mixplat.cuda as _C
 
 #---------------------------------------------------------------------#
@@ -279,7 +280,7 @@ def project_gaussians(
         Ks,
         width,
         height,
-        eps2d
+        eps2d,
         near_plane,
         far_plane,
         radius_clip,
@@ -322,7 +323,7 @@ class _ProjectGaussians(torch.autograd.Function):
             calc_compensations,
         )
 
-       if not calc_compensations:
+        if not calc_compensations:
             compensations = None
         ctx.save_for_backward(
             means, covars, viewmats, Ks, radii, conics, compensations

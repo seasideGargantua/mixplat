@@ -1,6 +1,8 @@
 import torch
+from torch import Tensor
 import mixplat.cuda as _C
 import math
+from typing import Optional, Tuple
 
 #---------------------------------------------------------------------#
 # Define the C++/CUDA Gaussians rasterization utils API               #
