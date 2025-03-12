@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include "third_party/glm/glm/glm.hpp"
 #include "third_party/glm/glm/gtc/type_ptr.hpp"
+#include "types.cuh"
 #include <cstdio>
 #include <iostream>
 
@@ -9,69 +10,51 @@
  * Projection of 3D Gaussians
  ****************************************************************************/
 
+template <typename T>
 __global__ void project_gaussians_forward_kernel(
-    const int num_points,
-    const float3* __restrict__ means3d,
-    const float* __restrict__ viewmat,
-    const float4 intrins,
-    const dim3 img_size,
-    const dim3 tile_bounds,
-    const unsigned block_width,
-    const float clip_thresh,
-    float* __restrict__ covs3d,
-    float2* __restrict__ xys,
-    float* __restrict__ depths,
-    int* __restrict__ radii,
-    float3* __restrict__ conics,
-    float* __restrict__ compensation,
-    int32_t* __restrict__ num_tiles_hit
+    const uint32_t C,
+    const uint32_t N,
+    const T *__restrict__ means,    // [N, 3]
+    const T *__restrict__ covars,   // [N, 6] optional
+    const T *__restrict__ viewmats, // [C, 4, 4]
+    const T *__restrict__ Ks,       // [C, 3, 3]
+    const int32_t image_width,
+    const int32_t image_height,
+    const T eps2d,
+    const T near_plane,
+    const T far_plane,
+    const T radius_clip,
+    // outputs
+    int32_t *__restrict__ radii,  // [C, N]
+    T *__restrict__ means2d,      // [C, N, 2]
+    T *__restrict__ depths,       // [C, N]
+    T *__restrict__ conics,       // [C, N, 3]
+    T *__restrict__ compensations // [C, N] optional
 );
 
+template <typename T>
 __global__ void project_gaussians_backward_kernel(
-    const int num_points,
-    const float3* __restrict__ means3d,
-    const float* __restrict__ viewmat,
-    const float4 intrins,
-    const dim3 img_size,
-    const float* __restrict__ cov3d,
-    const int* __restrict__ radii,
-    const float3* __restrict__ conics,
-    const float* __restrict__ compensation,
-    const float2* __restrict__ v_xy,
-    const float* __restrict__ v_depth,
-    const float3* __restrict__ v_conic,
-    const float* __restrict__ v_compensation,
-    float3* __restrict__ v_cov2d,
-    float* __restrict__ v_cov3d,
-    float3* __restrict__ v_mean3d,
-    float* __restrict__ v_viewmat
-);
-
-/****************************************************************************
- * Projection of 3D Gaussians utils
- ****************************************************************************/
-
-__device__ void project_cov3d_ewa(
-    const float3& __restrict__ mean3d,
-    const float* __restrict__ cov3d,
-    const float* __restrict__ viewmat,
-    const float fx,
-    const float fy,
-    const float tan_fovx,
-    const float tan_fovy,
-    float3 &cov2d,
-    float &compensation
-);
-
-__device__ void project_cov3d_ewa_vjp(
-    const float3& __restrict__ mean3d,
-    const float* __restrict__ cov3d,
-    const float* __restrict__ viewmat,
-    const float fx,
-    const float fy,
-    const float3& __restrict__ v_cov2d,
-    float3& __restrict__ v_mean3d,
-    float* __restrict__ v_cov3d,
-    glm::mat3& __restrict__ v_Rot,
-    glm::vec3& __restrict__ v_Trans
+    // fwd inputs
+    const uint32_t C,
+    const uint32_t N,
+    const T *__restrict__ means,    // [N, 3]
+    const T *__restrict__ covars,   // [N, 6]
+    const T *__restrict__ viewmats, // [C, 4, 4]
+    const T *__restrict__ Ks,       // [C, 3, 3]
+    const int32_t image_width,
+    const int32_t image_height,
+    const T eps2d,
+    // fwd outputs
+    const int32_t *__restrict__ radii,   // [C, N]
+    const T *__restrict__ conics,        // [C, N, 3]
+    const T *__restrict__ compensations, // [C, N] optional
+    // grad outputs
+    const T *__restrict__ v_means2d,       // [C, N, 2]
+    const T *__restrict__ v_depths,        // [C, N]
+    const T *__restrict__ v_conics,        // [C, N, 3]
+    const T *__restrict__ v_compensations, // [C, N] optional
+    // grad inputs
+    T *__restrict__ v_means,   // [N, 3]
+    T *__restrict__ v_covars,  // [N, 6] optional
+    T *__restrict__ v_viewmats // [C, 4, 4] optional
 );

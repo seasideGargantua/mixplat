@@ -13,6 +13,7 @@ def _make_lazy_cuda_func(name: str) -> Callable:
 
 rasterize_forward = _make_lazy_cuda_func("rasterize_forward")
 rasterize_backward = _make_lazy_cuda_func("rasterize_backward")
+rasterize_to_indices_in_range = _make_lazy_cuda_func("rasterize_to_indices_in_range")
 compute_3d_covariance_forward = _make_lazy_cuda_func("compute_3d_covariance_forward")
 compute_3d_covariance_backward = _make_lazy_cuda_func("compute_3d_covariance_backward")
 compute_4d_covariance_forward = _make_lazy_cuda_func("compute_4d_covariance_forward")
@@ -30,3 +31,5 @@ get_tile_bin_edges = _make_lazy_cuda_func("get_tile_bin_edges")
 reorder_data_forward = _make_lazy_cuda_func("reorder_data_forward")
 reorder_data_backward = _make_lazy_cuda_func("reorder_data_backward")
 compute_relocation = _make_lazy_cuda_func("compute_relocation")
+isect_tiles = _make_lazy_cuda_func("isect_tiles_tensor")
+isect_offset_encode = _make_lazy_cuda_func("isect_offset_encode_tensor")

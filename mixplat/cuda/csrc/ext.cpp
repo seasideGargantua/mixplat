@@ -16,6 +16,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("project_gaussians_backward", &project_gaussians_backward_tensor);
   m.def("rasterize_forward", &rasterize_forward_tensor);
   m.def("rasterize_backward", &rasterize_backward_tensor);
+  m.def("rasterize_to_indices_in_range", &rasterize_to_indices_in_range_tensor);
   // utils
   m.def("map_gaussian_to_intersects", &map_gaussian_to_intersects_tensor);
   m.def("get_tile_bin_edges", &get_tile_bin_edges_tensor);

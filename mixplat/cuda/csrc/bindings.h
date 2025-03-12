@@ -1,5 +1,6 @@
 #include "third_party/glm/glm/glm.hpp"
 #include "third_party/glm/glm/gtc/type_ptr.hpp"
+#include "types.cuh"
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
@@ -20,6 +21,18 @@
     CHECK_CONTIGUOUS(x)
 #define DEVICE_GUARD(_ten) \
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_ten));
+
+#define PRAGMA_UNROLL _Pragma("unroll")
+
+// https://github.com/pytorch/pytorch/blob/233305a852e1cd7f319b15b5137074c9eac455f6/aten/src/ATen/cuda/cub.cuh#L38-L46
+#define CUB_WRAPPER(func, ...)                                          \
+    do {                                                                       \
+        size_t temp_storage_bytes = 0;                                         \
+        func(nullptr, temp_storage_bytes, __VA_ARGS__);                        \
+        auto &caching_allocator = *::c10::cuda::CUDACachingAllocator::get();   \
+        auto temp_storage = caching_allocator.allocate(temp_storage_bytes);    \
+        func(temp_storage.get(), temp_storage_bytes, __VA_ARGS__);             \
+    } while (false)
 
 /****************************************************************************
  * 3D Spherical Harmonics
@@ -129,46 +142,44 @@ std::tuple<
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
-    torch::Tensor,
     torch::Tensor>
 project_gaussians_forward_tensor(
-    const int num_points,
-    torch::Tensor &means3d,
-    torch::Tensor &cov3d,
-    torch::Tensor &viewmat,
-    const float fx,
-    const float fy,
-    const float cx,
-    const float cy,
-    const unsigned img_height,
-    const unsigned img_width,
-    const unsigned block_width,
-    const float clip_thresh
+    const torch::Tensor &means,                // [N, 3]
+    const at::optional<torch::Tensor> &covars, // [N, 6]
+    const torch::Tensor &viewmats,             // [C, 4, 4]
+    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const float eps2d,
+    const float near_plane,
+    const float far_plane,
+    const float radius_clip,
+    const bool calc_compensations
 );
 
 std::tuple<
     torch::Tensor,
     torch::Tensor,
-    torch::Tensor,
     torch::Tensor>
 project_gaussians_backward_tensor(
-    const int num_points,
-    torch::Tensor &means3d,
-    torch::Tensor &viewmat,
-    const float fx,
-    const float fy,
-    const float cx,
-    const float cy,
-    const unsigned img_height,
-    const unsigned img_width,
-    torch::Tensor &cov3d,
-    torch::Tensor &radii,
-    torch::Tensor &conics,
-    torch::Tensor &compensation,
-    torch::Tensor &v_xy,
-    torch::Tensor &v_depth,
-    torch::Tensor &v_conic,
-    torch::Tensor &v_compensation
+    // fwd inputs
+    const torch::Tensor &means,                // [N, 3]
+    const at::optional<torch::Tensor> &covars, // [N, 6]
+    const torch::Tensor &viewmats,             // [C, 4, 4]
+    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const float eps2d,
+    // fwd outputs
+    const torch::Tensor &radii,                       // [C, N]
+    const torch::Tensor &conics,                      // [C, N, 3]
+    const at::optional<torch::Tensor> &compensations, // [C, N] optional
+    // grad outputs
+    const torch::Tensor &v_means2d,                     // [C, N, 2]
+    const torch::Tensor &v_depths,                      // [C, N]
+    const torch::Tensor &v_conics,                      // [C, N, 3]
+    const at::optional<torch::Tensor> &v_compensations, // [C, N] optional
+    const bool viewmats_requires_grad
 );
 
 /****************************************************************************
@@ -270,4 +281,50 @@ rasterize_backward_tensor(
     const torch::Tensor &v_output, // dL_dout_color
     const torch::Tensor &v_output_alpha, // dL_dout_alpha
     const torch::Tensor &v_output_invdepth // dL_dout_invdepth
+);
+
+/****************************************************************************
+ * Rasterization to Indices in Range
+ ****************************************************************************/
+
+std::tuple<torch::Tensor, torch::Tensor> rasterize_to_indices_in_range_tensor(
+    const uint32_t range_start,
+    const uint32_t range_end,           // iteration steps
+    const torch::Tensor transmittances, // [C, image_height, image_width]
+    // Gaussian parameters
+    const torch::Tensor &means2d,   // [C, N, 2]
+    const torch::Tensor &conics,    // [C, N, 3]
+    const torch::Tensor &opacities, // [C, N]
+    // image size
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size,
+    // intersections
+    const torch::Tensor &tile_offsets, // [C, tile_height, tile_width]
+    const torch::Tensor &flatten_ids   // [n_isects]
+);
+
+/****************************************************************************
+ * Gaussian Tile Intersection
+ ****************************************************************************/
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> isect_tiles_tensor(
+    const torch::Tensor &means2d,                    // [C, N, 2] or [nnz, 2]
+    const torch::Tensor &radii,                      // [C, N] or [nnz]
+    const torch::Tensor &depths,                     // [C, N] or [nnz]
+    const at::optional<torch::Tensor> &camera_ids,   // [nnz]
+    const at::optional<torch::Tensor> &gaussian_ids, // [nnz]
+    const uint32_t C,
+    const uint32_t tile_size,
+    const uint32_t tile_width,
+    const uint32_t tile_height,
+    const bool sort,
+    const bool double_buffer
+);
+
+torch::Tensor isect_offset_encode_tensor(
+    const torch::Tensor &isect_ids, // [n_isects]
+    const uint32_t C,
+    const uint32_t tile_width,
+    const uint32_t tile_height
 );

@@ -1,5 +1,7 @@
 #include "projection.h"
+#include "bindings.h"
 #include "helpers.cuh"
+#include "types.cuh"
 #include <algorithm>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
@@ -7,348 +9,317 @@
 #include <cuda_fp16.h>
 namespace cg = cooperative_groups;
 
-inline __device__ void warpSum3x3(glm::mat3& val, cg::thread_block_tile<32>& tile){
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            val[i][j] = cg::reduce(tile, val[i][j], cg::plus<float>());
-        }
-    }
-}
-
-inline __device__ void warpSum3(glm::vec3& val, cg::thread_block_tile<32>& tile){
-    for (int i = 0; i < 3; i++) {
-        val[i] = cg::reduce(tile, val[i], cg::plus<float>());
-    }
-}
-
 /****************************************************************************
  * Projection of 3D Gaussians forward part
  ****************************************************************************/
 
 // kernel function for projecting each gaussian on device
 // each thread processes one gaussian
+template <typename T>
 __global__ void project_gaussians_forward_kernel(
-    const int num_points,
-    const float3* __restrict__ means3d,
-    const float* __restrict__ viewmat,
-    const float4 intrins,
-    const dim3 img_size,
-    const dim3 tile_bounds,
-    const unsigned block_width,
-    const float clip_thresh,
-    float* __restrict__ covs3d,
-    float2* __restrict__ xys,
-    float* __restrict__ depths,
-    int* __restrict__ radii,
-    float3* __restrict__ conics,
-    float* __restrict__ compensation,
-    int32_t* __restrict__ num_tiles_hit
+    const uint32_t C,
+    const uint32_t N,
+    const T *__restrict__ means,    // [N, 3]
+    const T *__restrict__ covars,   // [N, 6] optional
+    const T *__restrict__ viewmats, // [C, 4, 4]
+    const T *__restrict__ Ks,       // [C, 3, 3]
+    const int32_t image_width,
+    const int32_t image_height,
+    const T eps2d,
+    const T near_plane,
+    const T far_plane,
+    const T radius_clip,
+    // outputs
+    int32_t *__restrict__ radii,  // [C, N]
+    T *__restrict__ means2d,      // [C, N, 2]
+    T *__restrict__ depths,       // [C, N]
+    T *__restrict__ conics,       // [C, N, 3]
+    T *__restrict__ compensations // [C, N] optional
 ) {
-    unsigned idx = cg::this_grid().thread_rank(); // idx of thread within grid
-    if (idx >= num_points) {
+    // parallelize over C * N.
+    uint32_t idx = cg::this_grid().thread_rank();
+    if (idx >= C * N) {
         return;
     }
-    radii[idx] = 0;
-    num_tiles_hit[idx] = 0;
+    const uint32_t cid = idx / N; // camera id
+    const uint32_t gid = idx % N; // gaussian id
 
-    float3 p_world = means3d[idx];
-    // printf("p_world %d %.2f %.2f %.2f\n", idx, p_world.x, p_world.y,
-    // p_world.z);
-    float3 p_view;
-    if (clip_near_plane(p_world, viewmat, p_view, clip_thresh)) {
-        // printf("%d is out of frustum z %.2f, returning\n", idx, p_view.z);
-        return;
-    }
-    float *cur_cov3d = covs3d + 6 * idx;
+    // shift pointers to the current camera and gaussian
+    means += gid * 3;
+    viewmats += cid * 16;
+    Ks += cid * 9;
 
-    // project to 2d with ewa approximation
-    float fx = intrins.x;
-    float fy = intrins.y;
-    float cx = intrins.z;
-    float cy = intrins.w;
-    float tan_fovx = 0.5 * img_size.x / fx;
-    float tan_fovy = 0.5 * img_size.y / fy;
-    float3 cov2d;
-    float comp;
-    project_cov3d_ewa(
-        p_world, cur_cov3d, viewmat, fx, fy, tan_fovx, tan_fovy,
-        cov2d, comp
+    // glm is column-major but input is row-major
+    mat3<T> R = mat3<T>(
+        viewmats[0],
+        viewmats[4],
+        viewmats[8], // 1st column
+        viewmats[1],
+        viewmats[5],
+        viewmats[9], // 2nd column
+        viewmats[2],
+        viewmats[6],
+        viewmats[10] // 3rd column
     );
-    // printf("cov2d %d, %.2f %.2f %.2f\n", idx, cov2d.x, cov2d.y, cov2d.z);
+    vec3<T> t = vec3<T>(viewmats[3], viewmats[7], viewmats[11]);
 
-    float3 conic;
-    float radius;
-    bool ok = compute_cov2d_bounds(cov2d, conic, radius);
-    if (!ok)
-        return; // zero determinant
-    // printf("conic %d %.2f %.2f %.2f\n", idx, conic.x, conic.y, conic.z);
-    conics[idx] = conic;
-
-    // compute the projected mean
-    float2 center = project_pix({fx, fy}, p_view, {cx, cy});
-    uint2 tile_min, tile_max;
-    get_tile_bbox(center, radius, tile_bounds, tile_min, tile_max, block_width);
-    int32_t tile_area = (tile_max.x - tile_min.x) * (tile_max.y - tile_min.y);
-    if (tile_area <= 0) {
-        // printf("%d point bbox outside of bounds\n", idx);
+    // transform Gaussian center to camera space
+    vec3<T> mean_c;
+    pos_world_to_cam(R, t, glm::make_vec3(means), mean_c);
+    if (mean_c.z < near_plane || mean_c.z > far_plane) {
+        radii[idx] = 0;
         return;
     }
 
-    num_tiles_hit[idx] = tile_area;
-    depths[idx] = p_view.z;
-    radii[idx] = (int)radius;
-    xys[idx] = center;
-    compensation[idx] = comp;
-    // printf(
-    //     "point %d x %.2f y %.2f z %.2f, radius %d, # tiles %d, tile_min %d
-    //     %d, tile_max %d %d\n", idx, center.x, center.y, depths[idx],
-    //     radii[idx], tile_area, tile_min.x, tile_min.y, tile_max.x, tile_max.y
-    // );
+    // transform Gaussian covariance to camera space
+    mat3<T> covar;
+    covars += gid * 6;
+    covar = mat3<T>(
+        covars[0],
+        covars[1],
+        covars[2], // 1st column
+        covars[1],
+        covars[3],
+        covars[4], // 2nd column
+        covars[2],
+        covars[4],
+        covars[5] // 3rd column
+    );
+    
+    mat3<T> covar_c;
+    covar_world_to_cam(R, covar, covar_c);
+
+    // perspective projection
+    mat2<T> covar2d;
+    vec2<T> mean2d;
+
+    persp_proj<T>(
+        mean_c,
+        covar_c,
+        Ks[0],
+        Ks[4],
+        Ks[2],
+        Ks[5],
+        image_width,
+        image_height,
+        covar2d,
+        mean2d
+    );
+            
+    T compensation;
+    T det = add_blur(eps2d, covar2d, compensation);
+    if (det <= 0.f) {
+        radii[idx] = 0;
+        return;
+    }
+
+    // compute the inverse of the 2d covariance
+    mat2<T> covar2d_inv;
+    inverse(covar2d, covar2d_inv);
+
+    // take 3 sigma as the radius (non differentiable)
+    T b = 0.5f * (covar2d[0][0] + covar2d[1][1]);
+    T v1 = b + sqrt(max(0.01f, b * b - det));
+    T radius = ceil(3.f * sqrt(v1));
+    // T v2 = b - sqrt(max(0.1f, b * b - det));
+    // T radius = ceil(3.f * sqrt(max(v1, v2)));
+
+    if (radius <= radius_clip) {
+        radii[idx] = 0;
+        return;
+    }
+
+    // mask out gaussians outside the image region
+    if (mean2d.x + radius <= 0 || mean2d.x - radius >= image_width ||
+        mean2d.y + radius <= 0 || mean2d.y - radius >= image_height) {
+        radii[idx] = 0;
+        return;
+    }
+
+    // write to outputs
+    radii[idx] = (int32_t)radius;
+    means2d[idx * 2] = mean2d.x;
+    means2d[idx * 2 + 1] = mean2d.y;
+    depths[idx] = mean_c.z;
+    conics[idx * 3] = covar2d_inv[0][0];
+    conics[idx * 3 + 1] = covar2d_inv[0][1];
+    conics[idx * 3 + 2] = covar2d_inv[1][1];
+    if (compensations != nullptr) {
+        compensations[idx] = compensation;
+    }
 }
 
 /****************************************************************************
  * Projection of 3D Gaussians backward part
  ****************************************************************************/
 
+template <typename T>
 __global__ void project_gaussians_backward_kernel(
-    const int num_points,
-    const float3* __restrict__ means3d,
-    const float* __restrict__ viewmat,
-    const float4 intrins,
-    const dim3 img_size,
-    const float* __restrict__ cov3d,
-    const int* __restrict__ radii,
-    const float3* __restrict__ conics,
-    const float* __restrict__ compensation,
-    const float2* __restrict__ v_xy,
-    const float* __restrict__ v_depth,
-    const float3* __restrict__ v_conic,
-    const float* __restrict__ v_compensation,
-    float3* __restrict__ v_cov2d,
-    float* __restrict__ v_cov3d,
-    float3* __restrict__ v_mean3d,
-    float* __restrict__ v_viewmat
+    // fwd inputs
+    const uint32_t C,
+    const uint32_t N,
+    const T *__restrict__ means,    // [N, 3]
+    const T *__restrict__ covars,   // [N, 6]
+    const T *__restrict__ viewmats, // [C, 4, 4]
+    const T *__restrict__ Ks,       // [C, 3, 3]
+    const int32_t image_width,
+    const int32_t image_height,
+    const T eps2d,
+    // fwd outputs
+    const int32_t *__restrict__ radii,   // [C, N]
+    const T *__restrict__ conics,        // [C, N, 3]
+    const T *__restrict__ compensations, // [C, N] optional
+    // grad outputs
+    const T *__restrict__ v_means2d,       // [C, N, 2]
+    const T *__restrict__ v_depths,        // [C, N]
+    const T *__restrict__ v_conics,        // [C, N, 3]
+    const T *__restrict__ v_compensations, // [C, N] optional
+    // grad inputs
+    T *__restrict__ v_means,   // [N, 3]
+    T *__restrict__ v_covars,  // [N, 6] optional
+    T *__restrict__ v_viewmats // [C, 4, 4] optional
 ) {
-    auto block = cg::this_thread_block();
-    unsigned idx = cg::this_grid().thread_rank(); // idx of thread within grid
-    if (idx >= num_points || radii[idx] <= 0) {
+    // parallelize over C * N.
+    uint32_t idx = cg::this_grid().thread_rank();
+    if (idx >= C * N || radii[idx] <= 0) {
         return;
     }
-    float3 p_world = means3d[idx];
-    float fx = intrins.x;
-    float fy = intrins.y;
-    float3 p_view = transform_4x3(viewmat, p_world);
-    // get v_mean3d from v_xy
-    v_mean3d[idx] = transform_4x3_rot_only_transposed(
-        viewmat,
-        project_pix_vjp({fx, fy}, p_view, v_xy[idx]));
+    const uint32_t cid = idx / N; // camera id
+    const uint32_t gid = idx % N; // gaussian id
 
-    // get z gradient contribution to mean3d gradient
-    // z = viemwat[8] * mean3d.x + viewmat[9] * mean3d.y + viewmat[10] *
-    // mean3d.z + viewmat[11]
-    float v_z = v_depth[idx];
-    v_mean3d[idx].x += viewmat[8] * v_z;
-    v_mean3d[idx].y += viewmat[9] * v_z;
-    v_mean3d[idx].z += viewmat[10] * v_z;
+    // shift pointers to the current camera and gaussian
+    means += gid * 3;
+    viewmats += cid * 16;
+    Ks += cid * 9;
 
-    // get v_cov2d
-    cov2d_to_conic_vjp(conics[idx], v_conic[idx], v_cov2d[idx]);
-    cov2d_to_compensation_vjp(compensation[idx], conics[idx], v_compensation[idx], v_cov2d[idx]);
-    // get v_cov3d (and v_mean3d contribution)
-    glm::mat3 v_Rot(0.f);
-    glm::vec3 v_Trans(0.f);
+    conics += idx * 3;
 
-    project_cov3d_ewa_vjp(
-        p_world,
-        &(cov3d[6 * idx]),
-        viewmat,
+    v_means2d += idx * 2;
+    v_depths += idx;
+    v_conics += idx * 3;
+
+    // vjp: compute the inverse of the 2d covariance
+    mat2<T> covar2d_inv = mat2<T>(conics[0], conics[1], conics[1], conics[2]);
+    mat2<T> v_covar2d_inv =
+        mat2<T>(v_conics[0], v_conics[1] * .5f, v_conics[1] * .5f, v_conics[2]);
+    mat2<T> v_covar2d(0.f);
+    inverse_vjp(covar2d_inv, v_covar2d_inv, v_covar2d);
+
+    if (v_compensations != nullptr) {
+        // vjp: compensation term
+        const T compensation = compensations[idx];
+        const T v_compensation = v_compensations[idx];
+        add_blur_vjp(
+            eps2d, covar2d_inv, compensation, v_compensation, v_covar2d
+        );
+    }
+
+    // transform Gaussian to camera space
+    mat3<T> R = mat3<T>(
+        viewmats[0],
+        viewmats[4],
+        viewmats[8], // 1st column
+        viewmats[1],
+        viewmats[5],
+        viewmats[9], // 2nd column
+        viewmats[2],
+        viewmats[6],
+        viewmats[10] // 3rd column
+    );
+    vec3<T> t = vec3<T>(viewmats[3], viewmats[7], viewmats[11]);
+
+    mat3<T> covar;
+    covars += gid * 6;
+    covar = mat3<T>(
+        covars[0],
+        covars[1],
+        covars[2], // 1st column
+        covars[1],
+        covars[3],
+        covars[4], // 2nd column
+        covars[2],
+        covars[4],
+        covars[5] // 3rd column
+    );
+    vec3<T> mean_c;
+    pos_world_to_cam(R, t, glm::make_vec3(means), mean_c);
+    mat3<T> covar_c;
+    covar_world_to_cam(R, covar, covar_c);
+
+    // vjp: perspective projection
+    T fx = Ks[0], cx = Ks[2], fy = Ks[4], cy = Ks[5];
+    mat3<T> v_covar_c(0.f);
+    vec3<T> v_mean_c(0.f);
+
+    persp_proj_vjp<T>(
+        mean_c,
+        covar_c,
         fx,
         fy,
-        v_cov2d[idx],
-        v_mean3d[idx],
-        &(v_cov3d[6 * idx]),
-        v_Rot,
-        v_Trans);
+        cx,
+        cy,
+        image_width,
+        image_height,
+        v_covar2d,
+        glm::make_vec2(v_means2d),
+        v_mean_c,
+        v_covar_c
+    );
 
-    if (v_viewmat != nullptr) {
-        cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
-        warpSum3x3(v_Rot, warp);
-        warpSum3(v_Trans, warp);
-        if (warp.thread_rank() == 0) {
-            for (uint32_t i = 0; i < 3; i++) { // rows
-                for (uint32_t j = 0; j < 3; j++) { // cols
-                    atomicAdd(v_viewmat + i * 4 + j, v_Rot[j][i]);
-                }
-                atomicAdd(v_viewmat + i * 4 + 3, v_Trans[i]);
+    // add contribution from v_depths
+    v_mean_c.z += v_depths[0];
+
+    // vjp: transform Gaussian covariance to camera space
+    vec3<T> v_mean(0.f);
+    mat3<T> v_covar(0.f);
+    mat3<T> v_R(0.f);
+    vec3<T> v_t(0.f);
+    pos_world_to_cam_vjp(
+        R, t, glm::make_vec3(means), v_mean_c, v_R, v_t, v_mean
+    );
+    covar_world_to_cam_vjp(R, covar, v_covar_c, v_R, v_covar);
+
+    // #if __CUDA_ARCH__ >= 700
+    // write out results with warp-level reduction
+    auto warp = cg::tiled_partition<32>(cg::this_thread_block());
+    auto warp_group_g = cg::labeled_partition(warp, gid);
+    if (v_means != nullptr) {
+        warpSum(v_mean, warp_group_g);
+        if (warp_group_g.thread_rank() == 0) {
+            v_means += gid * 3;
+            PRAGMA_UNROLL
+            for (uint32_t i = 0; i < 3; i++) {
+                gpuAtomicAdd(v_means + i, v_mean[i]);
             }
         }
     }
-}
 
-/****************************************************************************
- * Projection of Gaussians utils
- ****************************************************************************/
-
-// device helper to approximate projected 2d cov from 3d mean and cov
-__device__ void project_cov3d_ewa(
-    const float3& __restrict__ mean3d,
-    const float* __restrict__ cov3d,
-    const float* __restrict__ viewmat,
-    const float fx,
-    const float fy,
-    const float tan_fovx,
-    const float tan_fovy,
-    float3 &cov2d,
-    float &compensation
-) {
-    // clip the
-    // we expect row major matrices as input, glm uses column major
-    // upper 3x3 submatrix
-    glm::mat3 W = glm::mat3(
-        viewmat[0],viewmat[4],viewmat[8],
-        viewmat[1],viewmat[5],viewmat[9],
-        viewmat[2],viewmat[6],viewmat[10]
-    );
-    glm::vec3 p = glm::vec3(viewmat[3], viewmat[7], viewmat[11]);
-    glm::vec3 t = W * glm::vec3(mean3d.x, mean3d.y, mean3d.z) + p;
-
-    // clip so that the covariance
-    float lim_x = 1.3f * tan_fovx;
-    float lim_y = 1.3f * tan_fovy;
-    t.x = t.z * std::min(lim_x, std::max(-lim_x, t.x / t.z));
-    t.y = t.z * std::min(lim_y, std::max(-lim_y, t.y / t.z));
-
-    float rz = 1.f / t.z;
-    float rz2 = rz * rz;
-
-    // column major
-    // we only care about the top 2x2 submatrix
-    glm::mat3 J = glm::mat3(
-        fx * rz,0.f,0.f,
-        0.f,fy * rz,0.f,
-        -fx * t.x * rz2,-fy * t.y * rz2,0.f
-    );
-    glm::mat3 T = J * W;
-
-    glm::mat3 V = glm::mat3(
-        cov3d[0],cov3d[1],cov3d[2],
-        cov3d[1],cov3d[3],cov3d[4],
-        cov3d[2],cov3d[4],cov3d[5]
-    );
-
-    glm::mat3 cov = T * V * glm::transpose(T);
-
-    // add a little blur along axes and save upper triangular elements
-    // and compute the density compensation factor due to the blurs
-    float c00 = cov[0][0], c11 = cov[1][1], c01 = cov[0][1];
-    float det_orig = c00 * c11 - c01 * c01;
-    cov2d.x = c00 + 0.3f;
-    cov2d.y = c01;
-    cov2d.z = c11 + 0.3f;
-    float det_blur = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
-    compensation = std::sqrt(std::max(0.f, det_orig / det_blur));
-}
-
-// output space: 2D covariance, input space: cov3d
-__device__ void project_cov3d_ewa_vjp(
-    const float3& __restrict__ mean3d,
-    const float* __restrict__ cov3d,
-    const float* __restrict__ viewmat,
-    const float fx,
-    const float fy,
-    const float3& __restrict__ v_cov2d,
-    float3& __restrict__ v_mean3d,
-    float* __restrict__ v_cov3d,
-    glm::mat3& __restrict__ v_Rot,
-    glm::vec3& __restrict__ v_Trans
-) {
-    // viewmat is row major, glm is column major
-    // upper 3x3 submatrix
-    // clang-format off
-    glm::mat3 W = glm::mat3(
-        viewmat[0], viewmat[4], viewmat[8],
-        viewmat[1], viewmat[5], viewmat[9],
-        viewmat[2], viewmat[6], viewmat[10]
-    );
-    // clang-format on
-    glm::vec3 p = glm::vec3(viewmat[3], viewmat[7], viewmat[11]);
-    glm::vec3 t = W * glm::vec3(mean3d.x, mean3d.y, mean3d.z) + p;
-    float rz = 1.f / t.z;
-    float rz2 = rz * rz;
-
-    // column major
-    // we only care about the top 2x2 submatrix
-    // clang-format off
-    glm::mat3 J = glm::mat3(
-        fx * rz,         0.f,             0.f,
-        0.f,             fy * rz,         0.f,
-        -fx * t.x * rz2, -fy * t.y * rz2, 0.f
-    );
-    glm::mat3 V = glm::mat3(
-        cov3d[0], cov3d[1], cov3d[2],
-        cov3d[1], cov3d[3], cov3d[4],
-        cov3d[2], cov3d[4], cov3d[5]
-    );
-    // cov = T * V * Tt; G = df/dcov = v_cov
-    // -> d/dV = Tt * G * T
-    // -> df/dT = G * T * Vt + Gt * T * V
-    glm::mat3 v_cov = glm::mat3(
-        v_cov2d.x,        0.5f * v_cov2d.y, 0.f,
-        0.5f * v_cov2d.y, v_cov2d.z,        0.f,
-        0.f,              0.f,              0.f
-    );
-    // clang-format on
-
-    glm::mat3 T = J * W;
-    glm::mat3 Tt = glm::transpose(T);
-    glm::mat3 Vt = glm::transpose(V);
-    glm::mat3 v_V = Tt * v_cov * T;
-    glm::mat3 v_T = v_cov * T * Vt + glm::transpose(v_cov) * T * V;
-
-    // vjp of cov3d parameters
-    // v_cov3d_i = v_V : dV/d_cov3d_i
-    // where : is frobenius inner product
-    v_cov3d[0] = v_V[0][0];
-    v_cov3d[1] = v_V[0][1] + v_V[1][0];
-    v_cov3d[2] = v_V[0][2] + v_V[2][0];
-    v_cov3d[3] = v_V[1][1];
-    v_cov3d[4] = v_V[1][2] + v_V[2][1];
-    v_cov3d[5] = v_V[2][2];
-
-    // compute df/d_mean3d
-    // T = J * W
-    glm::mat3 v_J = v_T * glm::transpose(W);
-    float rz3 = rz2 * rz;
-    glm::vec3 v_t = glm::vec3(
-        -fx * rz2 * v_J[2][0],
-        -fy * rz2 * v_J[2][1],
-        -fx * rz2 * v_J[0][0] + 2.f * fx * t.x * rz3 * v_J[2][0] -
-            fy * rz2 * v_J[1][1] + 2.f * fy * t.y * rz3 * v_J[2][1]
-    );
-    // printf("v_t %.2f %.2f %.2f\n", v_t[0], v_t[1], v_t[2]);
-    // printf("W %.2f %.2f %.2f\n", W[0][0], W[0][1], W[0][2]);
-    v_mean3d.x += (float)glm::dot(v_t, W[0]);
-    v_mean3d.y += (float)glm::dot(v_t, W[1]);
-    v_mean3d.z += (float)glm::dot(v_t, W[2]);
-
-    // for D = W * X, G = df/dD
-    // df/dW = G * XT, df/dX = WT * G
-    glm::vec3 mean3d_gl = glm::vec3(mean3d.x, mean3d.y, mean3d.z);
-    glm::vec3 v_mean_c = W*glm::vec3(v_mean3d.x, v_mean3d.y, v_mean3d.z);
-    v_Rot += glm::outerProduct(v_mean_c, mean3d_gl);
-    v_Trans += v_mean_c;
-
-    // for D = W * X * WT, G = df/dD
-    // df/dX = WT * G * W
-    // df/dW
-    // = G * (X * WT)T + ((W * X)T * G)T
-    // = G * W * XT + (XT * WT * G)T
-    // = G * W * XT + GT * W * X
-    glm::mat3 v_cov_c = glm::mat3(
-        v_cov2d.x,        v_cov2d.y,        0.f,
-        v_cov2d.y,        v_cov2d.z,        0.f,
-        0.f,              0.f,              0.f
-    );
-    glm::mat3 v_V_c = glm::transpose(J) * v_cov * J;
-    v_Rot += v_V_c * W * glm::transpose(V) + glm::transpose(v_V_c) * W * V;
+    // Output gradients w.r.t. the covariance matrix
+    warpSum(v_covar, warp_group_g);
+    if (warp_group_g.thread_rank() == 0) {
+        v_covars += gid * 6;
+        gpuAtomicAdd(v_covars, v_covar[0][0]);
+        gpuAtomicAdd(v_covars + 1, v_covar[0][1] + v_covar[1][0]);
+        gpuAtomicAdd(v_covars + 2, v_covar[0][2] + v_covar[2][0]);
+        gpuAtomicAdd(v_covars + 3, v_covar[1][1]);
+        gpuAtomicAdd(v_covars + 4, v_covar[1][2] + v_covar[2][1]);
+        gpuAtomicAdd(v_covars + 5, v_covar[2][2]);
+    }
+    
+    if (v_viewmats != nullptr) {
+        auto warp_group_c = cg::labeled_partition(warp, cid);
+        warpSum(v_R, warp_group_c);
+        warpSum(v_t, warp_group_c);
+        if (warp_group_c.thread_rank() == 0) {
+            v_viewmats += cid * 16;
+            PRAGMA_UNROLL
+            for (uint32_t i = 0; i < 3; i++) { // rows
+                PRAGMA_UNROLL
+                for (uint32_t j = 0; j < 3; j++) { // cols
+                    gpuAtomicAdd(v_viewmats + i * 4 + j, v_R[j][i]);
+                }
+                gpuAtomicAdd(v_viewmats + i * 4 + 3, v_t[i]);
+            }
+        }
+    }
 }

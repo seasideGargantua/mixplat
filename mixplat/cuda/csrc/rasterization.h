@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 #include "third_party/glm/glm/glm.hpp"
 #include "third_party/glm/glm/gtc/type_ptr.hpp"
+#include "types.cuh"
 #include <cstdio>
 #include <iostream>
 #define MAX_BLOCK_SIZE ( 16 * 16 )
@@ -78,4 +79,32 @@ __global__ void rasterize_backward_kernel(
     float3* __restrict__ v_rgb,
     float* __restrict__ v_opacity,
     float* __restrict__ v_depth
+);
+
+/****************************************************************************
+ * Rasterization to Indices in Range
+ ****************************************************************************/
+
+template <typename T>
+__global__ void rasterize_to_indices_in_range_kernel(
+    const uint32_t range_start,
+    const uint32_t range_end,
+    const uint32_t C,
+    const uint32_t N,
+    const uint32_t n_isects,
+    const vec2<T> *__restrict__ means2d, // [C, N, 2]
+    const vec3<T> *__restrict__ conics,  // [C, N, 3]
+    const T *__restrict__ opacities,     // [C, N]
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size,
+    const uint32_t tile_width,
+    const uint32_t tile_height,
+    const int32_t *__restrict__ tile_offsets, // [C, tile_height, tile_width]
+    const int32_t *__restrict__ flatten_ids,  // [n_isects]
+    const T *__restrict__ transmittances,     // [C, image_height, image_width]
+    const int32_t *__restrict__ chunk_starts, // [C, image_height, image_width]
+    int32_t *__restrict__ chunk_cnts,         // [C, image_height, image_width]
+    int64_t *__restrict__ gaussian_ids,       // [n_elems]
+    int64_t *__restrict__ pixel_ids           // [n_elems]
 );

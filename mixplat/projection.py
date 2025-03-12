@@ -227,17 +227,17 @@ class _Compute4DCovariance(torch.autograd.Function):
 #-------------------------------------------------------------#
 
 def project_gaussians(
-    means3d,
-    cov3d,
-    viewmat,
-    fx,
-    fy,
-    cx,
-    cy,
-    img_height,
-    img_width,
-    block_width = 16,
-    clip_thresh = 0.01
+    means: Tensor,  # [N, 3]
+    covars: Tensor,  # [N, 6]
+    viewmats: Tensor,  # [4, 4]
+    Ks: Tensor,  # [3, 3]
+    width: int,
+    height: int,
+    eps2d: float = 0.3,
+    near_plane: float = 0.01,
+    far_plane: float = 1e10,
+    radius_clip: float = 0.0,
+    calc_compensations: bool = True,
 ):
     """This function projects 3D gaussians to 2D using the EWA splatting method for gaussian splatting.
 
@@ -247,10 +247,7 @@ def project_gaussians(
     Args:
        means3d (Tensor): xyzs of gaussians.
        viewmat (Tensor): view matrix for rendering.
-       fx (float): focal length x.
-       fy (float): focal length y.
-       cx (float): principal point x.
-       cy (float): principal point y.
+       Ks (float): 3x3 intrinsic matrix.
        img_height (int): height of the rendered image.
        img_width (int): width of the rendered image.
        block_width (int): side length of tiles inside projection/rasterization in pixels (always square). 16 is a good default value, must be between 2 and 16 inclusive.
@@ -266,19 +263,27 @@ def project_gaussians(
         - **compensation** (Tensor): the density compensation for blurring 2D kernel
         - **num_tiles_hit** (Tensor): number of tiles hit per gaussian.
     """
-    assert block_width > 1 and block_width <= 16, "block_width must be between 2 and 16"
+    N = means.size(0)
+    assert means.size() == (N, 3), means.size()
+    assert viewmats.size() == (4, 4), viewmats.size()
+    assert Ks.size() == (3, 3), Ks.size()
+    assert covars.size() == (N, 6), covars.size()
+    means = means.contiguous()
+    viewmats = viewmats.contiguous()
+    Ks = Ks.contiguous()
+    covars = covars.contiguous()
     return _ProjectGaussians.apply(
-        means3d.contiguous(),
-        cov3d.contiguous(),
-        viewmat.contiguous(),
-        fx,
-        fy,
-        cx,
-        cy,
-        img_height,
-        img_width,
-        block_width,
-        clip_thresh
+        means,
+        covars,
+        viewmat,
+        Ks,
+        width,
+        height,
+        eps2d
+        near_plane,
+        far_plane,
+        radius_clip,
+        calc_compensations,
     )
 
 class _ProjectGaussians(torch.autograd.Function):
@@ -287,131 +292,97 @@ class _ProjectGaussians(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        means3d,
-        cov3d,
-        viewmat,
-        fx,
-        fy,
-        cx,
-        cy,
-        img_height,
-        img_width,
-        block_width,
-        clip_thresh = 0.01
+        means: Tensor,  # [N, 3]
+        covars: Tensor,  # [N, 6]
+        viewmats: Tensor,  # [C, 4, 4]
+        Ks: Tensor,  # [C, 3, 3]
+        width: int,
+        height: int,
+        eps2d: float,
+        near_plane: float,
+        far_plane: float,
+        radius_clip: float,
+        calc_compensations: bool,
     ):
         num_points = means3d.shape[-2]
         if num_points < 1 or means3d.shape[-1] != 3:
             raise ValueError(f"Invalid shape for means3d: {means3d.shape}")
 
-        (
-            xys,
-            depths,
-            radii,
-            conics,
-            compensation,
-            num_tiles_hit,
-        ) = _C.project_gaussians_forward(
-            num_points,
-            means3d,
-            cov3d,
-            viewmat,
-            fx,
-            fy,
-            cx,
-            cy,
-            img_height,
-            img_width,
-            block_width,
-            clip_thresh
+        radii, means2d, depths, conics, compensations = _C.project_gaussians_forward(
+            means,
+            covars,
+            viewmats,
+            Ks,
+            width,
+            height,
+            eps2d,
+            near_plane,
+            far_plane,
+            radius_clip,
+            calc_compensations,
         )
 
-        # Save non-tensors.
-        ctx.img_height = img_height
-        ctx.img_width = img_width
-        ctx.num_points = num_points
-        ctx.fx = fx
-        ctx.fy = fy
-        ctx.cx = cx
-        ctx.cy = cy
-
-        # Save tensors.
+       if not calc_compensations:
+            compensations = None
         ctx.save_for_backward(
-            means3d,
-            cov3d,
-            viewmat,
-            radii,
-            conics,
-            compensation,
+            means, covars, viewmats, Ks, radii, conics, compensations
         )
+        ctx.width = width
+        ctx.height = height
+        ctx.eps2d = eps2d
 
-        return (xys, depths, radii, conics, compensation, num_tiles_hit)
+        return radii, means2d, depths, conics, compensations
 
     @staticmethod
-    def backward(
-        ctx,
-        v_xys,
-        v_depths,
-        v_radii,
-        v_conics,
-        v_compensation,
-        v_num_tiles_hit
-    ):
+    def backward(ctx, v_radii, v_means2d, v_depths, v_conics, v_compensations):
         (
-            means3d,
-            cov3d,
-            viewmat,
+            means,
+            covars,
+            viewmats,
+            Ks,
             radii,
             conics,
-            compensation,
+            compensations,
         ) = ctx.saved_tensors
-
-        (v_cov2d, v_cov3d, v_mean3d, v_viewmat) = _C.project_gaussians_backward(
-            ctx.num_points,
-            means3d,
-            viewmat,
-            ctx.fx,
-            ctx.fy,
-            ctx.cx,
-            ctx.cy,
-            ctx.img_height,
-            ctx.img_width,
-            cov3d,
+        width = ctx.width
+        height = ctx.height
+        eps2d = ctx.eps2d
+        if v_compensations is not None:
+            v_compensations = v_compensations.contiguous()
+        v_means, v_covars, v_viewmats =_C.project_gaussians_backward(
+            means,
+            covars,
+            viewmats,
+            Ks,
+            width,
+            height,
+            eps2d,
             radii,
             conics,
-            compensation,
-            v_xys,
-            v_depths,
-            v_conics,
-            v_compensation,
+            compensations,
+            v_means2d.contiguous(),
+            v_depths.contiguous(),
+            v_conics.contiguous(),
+            v_compensations,
+            ctx.needs_input_grad[2],  # viewmats_requires_grad
         )
-
-        # Return a gradient for each input.
+        if not ctx.needs_input_grad[0]:
+            v_means = None
+        if not ctx.needs_input_grad[1]:
+            v_covars = None
+        if not ctx.needs_input_grad[2]:
+            v_viewmats = None
         return (
-            # means3d: Float[Tensor, "*batch 3"],
-            v_mean3d,
-            # cov3d: Float[Tensor, "*batch 3 3"],
-            v_cov3d,
-            # viewmat: Float[Tensor, "3 4"],
-            v_viewmat,
-            # fx: float,
+            v_means,
+            v_covars,
+            v_viewmats,
             None,
-            # fy: float,
             None,
-            # cx: float,
             None,
-            # cy: float,
             None,
-            # img_height: int,
             None,
-            # img_width: int,
             None,
-            # block_width: int,
             None,
-            #delta_means: Optional[Tensor],
-            None,
-            # clip_thresh,
-            None,
-            # mask: Optional[Tensor],
             None,
         )
 

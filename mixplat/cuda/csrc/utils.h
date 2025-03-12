@@ -1,6 +1,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <torch/extension.h>
+#include "types.cuh"
 #include "third_party/glm/glm/glm.hpp"
 #include "third_party/glm/glm/gtc/type_ptr.hpp"
 
@@ -71,3 +72,41 @@ __global__ void compute_relocation_kernel(
     float* opacity_new, 
     float* scale_new,
     float* scale_t_new);
+
+/****************************************************************************
+ * Gaussian Tile Intersection
+ ****************************************************************************/
+
+template <typename T>
+__global__ void isect_tiles(
+    // if the data is [C, N, ...] or [nnz, ...] (packed)
+    const bool packed,
+    // parallelize over C * N, only used if packed is False
+    const uint32_t C,
+    const uint32_t N,
+    // parallelize over nnz, only used if packed is True
+    const uint32_t nnz,
+    const int64_t *__restrict__ camera_ids,   // [nnz] optional
+    const int64_t *__restrict__ gaussian_ids, // [nnz] optional
+    // data
+    const T *__restrict__ means2d,                   // [C, N, 2] or [nnz, 2]
+    const int32_t *__restrict__ radii,               // [C, N] or [nnz]
+    const T *__restrict__ depths,                    // [C, N] or [nnz]
+    const int64_t *__restrict__ cum_tiles_per_gauss, // [C, N] or [nnz]
+    const uint32_t tile_size,
+    const uint32_t tile_width,
+    const uint32_t tile_height,
+    const uint32_t tile_n_bits,
+    int32_t *__restrict__ tiles_per_gauss, // [C, N] or [nnz]
+    int64_t *__restrict__ isect_ids,       // [n_isects]
+    int32_t *__restrict__ flatten_ids      // [n_isects]
+);
+
+__global__ void isect_offset_encode(
+    const uint32_t n_isects,
+    const int64_t *__restrict__ isect_ids,
+    const uint32_t C,
+    const uint32_t n_tiles,
+    const uint32_t tile_n_bits,
+    int32_t *__restrict__ offsets // [C, n_tiles]
+);

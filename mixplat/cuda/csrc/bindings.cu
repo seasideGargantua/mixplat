@@ -4,10 +4,12 @@
 #include "rasterization.h"
 #include "helpers.cuh"
 #include "utils.h"
+#include "types.cuh"
 #include <cstdio>
 #include <iostream>
 #include <torch/extension.h>
 #include <tuple>
+#include <cub/cub.cuh>
 
 /****************************************************************************
  * 3D Spherical Harmonics
@@ -394,139 +396,153 @@ std::tuple<
     torch::Tensor,
     torch::Tensor,
     torch::Tensor,
-    torch::Tensor,
     torch::Tensor>
 project_gaussians_forward_tensor(
-    const int num_points,
-    torch::Tensor &means3d,
-    torch::Tensor &cov3d,
-    torch::Tensor &viewmat,
-    const float fx,
-    const float fy,
-    const float cx,
-    const float cy,
-    const unsigned img_height,
-    const unsigned img_width,
-    const unsigned block_width,
-    const float clip_thresh
+    const torch::Tensor &means,                // [N, 3]
+    const at::optional<torch::Tensor> &covars, // [N, 6]
+    const torch::Tensor &viewmats,             // [C, 4, 4]
+    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const float eps2d,
+    const float near_plane,
+    const float far_plane,
+    const float radius_clip,
+    const bool calc_compensations
 ) {
-    DEVICE_GUARD(means3d);
-    dim3 img_size_dim3;
-    img_size_dim3.x = img_width;
-    img_size_dim3.y = img_height;
+    DEVICE_GUARD(means);
+    CHECK_INPUT(means);
+    CHECK_INPUT(covars.value());
+    CHECK_INPUT(viewmats);
+    CHECK_INPUT(Ks);
 
-    dim3 tile_bounds_dim3;
-    tile_bounds_dim3.x = int((img_width + block_width - 1) / block_width);
-    tile_bounds_dim3.y = int((img_height + block_width - 1) / block_width);
-    tile_bounds_dim3.z = 1;
+    uint32_t N = means.size(0);    // number of gaussians
+    uint32_t C = viewmats.size(0); // number of cameras
+    at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
 
-    float4 intrins = {fx, fy, cx, cy};
-
-    // Triangular covariance.
-    torch::Tensor xys_d =
-        torch::zeros({num_points, 2}, means3d.options().dtype(torch::kFloat32));
-    torch::Tensor depths_d =
-        torch::zeros({num_points}, means3d.options().dtype(torch::kFloat32));
-    torch::Tensor radii_d =
-        torch::zeros({num_points}, means3d.options().dtype(torch::kInt32));
-    torch::Tensor conics_d =
-        torch::zeros({num_points, 3}, means3d.options().dtype(torch::kFloat32));
-    torch::Tensor compensation_d =
-        torch::zeros({num_points}, means3d.options().dtype(torch::kFloat32));
-    torch::Tensor num_tiles_hit_d =
-        torch::zeros({num_points}, means3d.options().dtype(torch::kInt32));
-
-    project_gaussians_forward_kernel<<<
-        (num_points + N_THREADS - 1) / N_THREADS,
-        N_THREADS>>>(
-        num_points,
-        (float3 *)means3d.contiguous().data_ptr<float>(),
-        viewmat.contiguous().data_ptr<float>(),
-        intrins,
-        img_size_dim3,
-        tile_bounds_dim3,
-        block_width,
-        clip_thresh,
-        cov3d.contiguous().data_ptr<float>(),
-        // Outputs.
-        (float2 *)xys_d.contiguous().data_ptr<float>(),
-        depths_d.contiguous().data_ptr<float>(),
-        radii_d.contiguous().data_ptr<int>(),
-        (float3 *)conics_d.contiguous().data_ptr<float>(),
-        compensation_d.contiguous().data_ptr<float>(),
-        num_tiles_hit_d.contiguous().data_ptr<int32_t>()
-    );
-
-    return std::make_tuple(
-        xys_d, depths_d, radii_d, conics_d, compensation_d, num_tiles_hit_d
-    );
+    torch::Tensor radii =
+        torch::empty({C, N}, means.options().dtype(torch::kInt32));
+    torch::Tensor means2d = torch::empty({C, N, 2}, means.options());
+    torch::Tensor depths = torch::empty({C, N}, means.options());
+    torch::Tensor conics = torch::empty({C, N, 3}, means.options());
+    torch::Tensor compensations;
+    if (calc_compensations) {
+        // we dont want NaN to appear in this tensor, so we zero intialize it
+        compensations = torch::zeros({C, N}, means.options());
+    }
+    if (N) {
+        project_gaussians_forward_kernel<float>
+            <<<(N + N_THREADS - 1) / N_THREADS,
+               N_THREADS,
+               0,
+               stream>>>(
+                C,
+                N,
+                means.data_ptr<float>(),
+                covars.value().data_ptr<float>(),
+                viewmats.data_ptr<float>(),
+                Ks.data_ptr<float>(),
+                image_width,
+                image_height,
+                eps2d,
+                near_plane,
+                far_plane,
+                radius_clip,
+                radii.data_ptr<int32_t>(),
+                means2d.data_ptr<float>(),
+                depths.data_ptr<float>(),
+                conics.data_ptr<float>(),
+                calc_compensations ? compensations.data_ptr<float>() : nullptr
+            );
+    }
+    return std::make_tuple(radii, means2d, depths, conics, compensations);
 }
 
 std::tuple<
     torch::Tensor,
     torch::Tensor,
-    torch::Tensor,
     torch::Tensor>
 project_gaussians_backward_tensor(
-    const int num_points,
-    torch::Tensor &means3d,
-    torch::Tensor &viewmat,
-    const float fx,
-    const float fy,
-    const float cx,
-    const float cy,
-    const unsigned img_height,
-    const unsigned img_width,
-    torch::Tensor &cov3d,
-    torch::Tensor &radii,
-    torch::Tensor &conics,
-    torch::Tensor &compensation,
-    torch::Tensor &v_xy,
-    torch::Tensor &v_depth,
-    torch::Tensor &v_conic,
-    torch::Tensor &v_compensation
-){
-    DEVICE_GUARD(means3d);
-    dim3 img_size_dim3;
-    img_size_dim3.x = img_width;
-    img_size_dim3.y = img_height;
+    // fwd inputs
+    const torch::Tensor &means,                // [N, 3]
+    const at::optional<torch::Tensor> &covars, // [N, 6]
+    const torch::Tensor &viewmats,             // [C, 4, 4]
+    const torch::Tensor &Ks,                   // [C, 3, 3]
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const float eps2d,
+    // fwd outputs
+    const torch::Tensor &radii,                       // [C, N]
+    const torch::Tensor &conics,                      // [C, N, 3]
+    const at::optional<torch::Tensor> &compensations, // [C, N] optional
+    // grad outputs
+    const torch::Tensor &v_means2d,                     // [C, N, 2]
+    const torch::Tensor &v_depths,                      // [C, N]
+    const torch::Tensor &v_conics,                      // [C, N, 3]
+    const at::optional<torch::Tensor> &v_compensations, // [C, N] optional
+    const bool viewmats_requires_grad
+) {
+    DEVICE_GUARD(means);
+    CHECK_INPUT(means);
+    CHECK_INPUT(covars.value());
+    CHECK_INPUT(viewmats);
+    CHECK_INPUT(Ks);
+    CHECK_INPUT(radii);
+    CHECK_INPUT(conics);
+    CHECK_INPUT(v_means2d);
+    CHECK_INPUT(v_depths);
+    CHECK_INPUT(v_conics);
+    if (compensations.has_value()) {
+        CHECK_INPUT(compensations.value());
+    }
+    if (v_compensations.has_value()) {
+        CHECK_INPUT(v_compensations.value());
+        assert(compensations.has_value());
+    }
 
-    float4 intrins = {fx, fy, cx, cy};
+    uint32_t N = means.size(0);    // number of gaussians
+    uint32_t C = viewmats.size(0); // number of cameras
+    at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
 
-    // Triangular covariance.
-    torch::Tensor v_cov2d =
-        torch::zeros({num_points, 3}, means3d.options().dtype(torch::kFloat32));
-    torch::Tensor v_cov3d =
-        torch::zeros({num_points, 6}, means3d.options().dtype(torch::kFloat32));
-    torch::Tensor v_mean3d =
-        torch::zeros({num_points, 3}, means3d.options().dtype(torch::kFloat32));
-    torch::Tensor v_viewmat =
-        torch::zeros({3, 4}, means3d.options().dtype(torch::kFloat32));
-
-    project_gaussians_backward_kernel<<<
-        (num_points + N_THREADS - 1) / N_THREADS,
-        N_THREADS>>>(
-        num_points,
-        (float3 *)means3d.contiguous().data_ptr<float>(),
-        viewmat.contiguous().data_ptr<float>(),
-        intrins,
-        img_size_dim3,
-        cov3d.contiguous().data_ptr<float>(),
-        radii.contiguous().data_ptr<int32_t>(),
-        (float3 *)conics.contiguous().data_ptr<float>(),
-        (float *)compensation.contiguous().data_ptr<float>(),
-        (float2 *)v_xy.contiguous().data_ptr<float>(),
-        v_depth.contiguous().data_ptr<float>(),
-        (float3 *)v_conic.contiguous().data_ptr<float>(),
-        (float *)v_compensation.contiguous().data_ptr<float>(),
-        // Outputs.
-        (float3 *)v_cov2d.contiguous().data_ptr<float>(),
-        v_cov3d.contiguous().data_ptr<float>(),
-        (float3 *)v_mean3d.contiguous().data_ptr<float>(),
-        v_viewmat.contiguous().data_ptr<float>()
-    );
-
-    return std::make_tuple(v_cov2d, v_cov3d, v_mean3d, v_viewmat);
+    torch::Tensor v_means = torch::zeros_like(means);
+    torch::Tensor v_covars = torch::zeros_like(covars.value()); // optional
+    
+    torch::Tensor v_viewmats;
+    if (viewmats_requires_grad) {
+        v_viewmats = torch::zeros_like(viewmats);
+    }
+    if (N) {
+        project_gaussians_backward_kernel<float>
+            <<<(N + N_THREADS - 1) / N_THREADS,
+               N_THREADS,
+               0,
+               stream>>>(
+                C,
+                N,
+                means.data_ptr<float>(),
+                covars.value().data_ptr<float>(),
+                viewmats.data_ptr<float>(),
+                Ks.data_ptr<float>(),
+                image_width,
+                image_height,
+                eps2d,
+                radii.data_ptr<int32_t>(),
+                conics.data_ptr<float>(),
+                compensations.has_value()
+                    ? compensations.value().data_ptr<float>()
+                    : nullptr,
+                v_means2d.data_ptr<float>(),
+                v_depths.data_ptr<float>(),
+                v_conics.data_ptr<float>(),
+                v_compensations.has_value()
+                    ? v_compensations.value().data_ptr<float>()
+                    : nullptr,
+                v_means.data_ptr<float>(),
+                v_covars.data_ptr<float>(),
+                viewmats_requires_grad ? v_viewmats.data_ptr<float>() : nullptr
+            );
+    }
+    return std::make_tuple(v_means, v_covars, v_viewmats);
 }
 
 /****************************************************************************
@@ -768,3 +784,370 @@ rasterize_backward_tensor(
     return std::make_tuple(v_xy, v_conic, v_colors, v_opacity, v_depth);
 }
 
+/****************************************************************************
+ * Rasterization to Indices in Range
+ ****************************************************************************/
+
+std::tuple<torch::Tensor, torch::Tensor> rasterize_to_indices_in_range_tensor(
+    const uint32_t range_start,
+    const uint32_t range_end,           // iteration steps
+    const torch::Tensor transmittances, // [C, image_height, image_width]
+    // Gaussian parameters
+    const torch::Tensor &means2d,   // [C, N, 2]
+    const torch::Tensor &conics,    // [C, N, 3]
+    const torch::Tensor &opacities, // [C, N]
+    // image size
+    const uint32_t image_width,
+    const uint32_t image_height,
+    const uint32_t tile_size,
+    // intersections
+    const torch::Tensor &tile_offsets, // [C, tile_height, tile_width]
+    const torch::Tensor &flatten_ids   // [n_isects]
+) {
+    DEVICE_GUARD(means2d);
+    CHECK_INPUT(means2d);
+    CHECK_INPUT(conics);
+    CHECK_INPUT(opacities);
+    CHECK_INPUT(tile_offsets);
+    CHECK_INPUT(flatten_ids);
+
+    uint32_t C = means2d.size(0); // number of cameras
+    uint32_t N = means2d.size(1); // number of gaussians
+    uint32_t tile_height = tile_offsets.size(1);
+    uint32_t tile_width = tile_offsets.size(2);
+    uint32_t n_isects = flatten_ids.size(0);
+
+    // Each block covers a tile on the image. In total there are
+    // C * tile_height * tile_width blocks.
+    dim3 threads = {tile_size, tile_size, 1};
+    dim3 blocks = {C, tile_height, tile_width};
+
+    at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+    const uint32_t shared_mem =
+        tile_size * tile_size *
+        (sizeof(int32_t) + sizeof(vec3<float>) + sizeof(vec3<float>));
+    if (cudaFuncSetAttribute(
+            rasterize_to_indices_in_range_kernel<float>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            shared_mem
+        ) != cudaSuccess) {
+        AT_ERROR(
+            "Failed to set maximum shared memory size (requested ",
+            shared_mem,
+            " bytes), try lowering tile_size."
+        );
+    }
+
+    // First pass: count the number of gaussians that contribute to each pixel
+    int64_t n_elems;
+    torch::Tensor chunk_starts;
+    if (n_isects) {
+        torch::Tensor chunk_cnts = torch::zeros(
+            {C * image_height * image_width},
+            means2d.options().dtype(torch::kInt32)
+        );
+        rasterize_to_indices_in_range_kernel<float>
+            <<<blocks, threads, shared_mem, stream>>>(
+                range_start,
+                range_end,
+                C,
+                N,
+                n_isects,
+                reinterpret_cast<vec2<float> *>(means2d.data_ptr<float>()),
+                reinterpret_cast<vec3<float> *>(conics.data_ptr<float>()),
+                opacities.data_ptr<float>(),
+                image_width,
+                image_height,
+                tile_size,
+                tile_width,
+                tile_height,
+                tile_offsets.data_ptr<int32_t>(),
+                flatten_ids.data_ptr<int32_t>(),
+                transmittances.data_ptr<float>(),
+                nullptr,
+                chunk_cnts.data_ptr<int32_t>(),
+                nullptr,
+                nullptr
+            );
+
+        torch::Tensor cumsum =
+            torch::cumsum(chunk_cnts, 0, chunk_cnts.scalar_type());
+        n_elems = cumsum[-1].item<int64_t>();
+        chunk_starts = cumsum - chunk_cnts;
+    } else {
+        n_elems = 0;
+    }
+
+    // Second pass: allocate memory and write out the gaussian and pixel ids.
+    torch::Tensor gaussian_ids =
+        torch::empty({n_elems}, means2d.options().dtype(torch::kInt64));
+    torch::Tensor pixel_ids =
+        torch::empty({n_elems}, means2d.options().dtype(torch::kInt64));
+    if (n_elems) {
+        rasterize_to_indices_in_range_kernel<float>
+            <<<blocks, threads, shared_mem, stream>>>(
+                range_start,
+                range_end,
+                C,
+                N,
+                n_isects,
+                reinterpret_cast<vec2<float> *>(means2d.data_ptr<float>()),
+                reinterpret_cast<vec3<float> *>(conics.data_ptr<float>()),
+                opacities.data_ptr<float>(),
+                image_width,
+                image_height,
+                tile_size,
+                tile_width,
+                tile_height,
+                tile_offsets.data_ptr<int32_t>(),
+                flatten_ids.data_ptr<int32_t>(),
+                transmittances.data_ptr<float>(),
+                chunk_starts.data_ptr<int32_t>(),
+                nullptr,
+                gaussian_ids.data_ptr<int64_t>(),
+                pixel_ids.data_ptr<int64_t>()
+            );
+    }
+    return std::make_tuple(gaussian_ids, pixel_ids);
+}
+
+/****************************************************************************
+ * Gaussian Tile Intersection
+ ****************************************************************************/
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> isect_tiles_tensor(
+    const torch::Tensor &means2d,                    // [C, N, 2] or [nnz, 2]
+    const torch::Tensor &radii,                      // [C, N] or [nnz]
+    const torch::Tensor &depths,                     // [C, N] or [nnz]
+    const at::optional<torch::Tensor> &camera_ids,   // [nnz]
+    const at::optional<torch::Tensor> &gaussian_ids, // [nnz]
+    const uint32_t C,
+    const uint32_t tile_size,
+    const uint32_t tile_width,
+    const uint32_t tile_height,
+    const bool sort,
+    const bool double_buffer
+) {
+    DEVICE_GUARD(means2d);
+    CHECK_INPUT(means2d);
+    CHECK_INPUT(radii);
+    CHECK_INPUT(depths);
+    if (camera_ids.has_value()) {
+        CHECK_INPUT(camera_ids.value());
+    }
+    if (gaussian_ids.has_value()) {
+        CHECK_INPUT(gaussian_ids.value());
+    }
+    bool packed = means2d.dim() == 2;
+
+    uint32_t N = 0, nnz = 0, total_elems = 0;
+    int64_t *camera_ids_ptr = nullptr;
+    int64_t *gaussian_ids_ptr = nullptr;
+    if (packed) {
+        nnz = means2d.size(0);
+        total_elems = nnz;
+        TORCH_CHECK(
+            camera_ids.has_value() && gaussian_ids.has_value(),
+            "When packed is set, camera_ids and gaussian_ids must be provided."
+        );
+        camera_ids_ptr = camera_ids.value().data_ptr<int64_t>();
+        gaussian_ids_ptr = gaussian_ids.value().data_ptr<int64_t>();
+    } else {
+        N = means2d.size(1); // number of gaussians
+        total_elems = C * N;
+    }
+
+    uint32_t n_tiles = tile_width * tile_height;
+    at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+
+    // the number of bits needed to encode the camera id and tile id
+    // Note: std::bit_width requires C++20
+    // uint32_t tile_n_bits = std::bit_width(n_tiles);
+    // uint32_t cam_n_bits = std::bit_width(C);
+    uint32_t tile_n_bits = (uint32_t)floor(log2(n_tiles)) + 1;
+    uint32_t cam_n_bits = (uint32_t)floor(log2(C)) + 1;
+    // the first 32 bits are used for the camera id and tile id altogether, so
+    // check if we have enough bits for them.
+    assert(tile_n_bits + cam_n_bits <= 32);
+
+    // first pass: compute number of tiles per gaussian
+    torch::Tensor tiles_per_gauss =
+        torch::empty_like(depths, depths.options().dtype(torch::kInt32));
+
+    int64_t n_isects;
+    torch::Tensor cum_tiles_per_gauss;
+    if (total_elems) {
+        AT_DISPATCH_FLOATING_TYPES_AND2(
+            at::ScalarType::Half,
+            at::ScalarType::BFloat16,
+            means2d.scalar_type(),
+            "isect_tiles_total_elems",
+            [&]() {
+                isect_tiles<<<
+                    (total_elems + N_THREADS - 1) / N_THREADS,
+                    N_THREADS,
+                    0,
+                    stream>>>(
+                    packed,
+                    C,
+                    N,
+                    nnz,
+                    camera_ids_ptr,
+                    gaussian_ids_ptr,
+                    reinterpret_cast<scalar_t *>(means2d.data_ptr<scalar_t>()),
+                    radii.data_ptr<int32_t>(),
+                    depths.data_ptr<scalar_t>(),
+                    nullptr,
+                    tile_size,
+                    tile_width,
+                    tile_height,
+                    tile_n_bits,
+                    tiles_per_gauss.data_ptr<int32_t>(),
+                    nullptr,
+                    nullptr
+                );
+            }
+        );
+        cum_tiles_per_gauss = torch::cumsum(tiles_per_gauss.view({-1}), 0);
+        n_isects = cum_tiles_per_gauss[-1].item<int64_t>();
+    } else {
+        n_isects = 0;
+    }
+
+    // second pass: compute isect_ids and flatten_ids as a packed tensor
+    torch::Tensor isect_ids =
+        torch::empty({n_isects}, depths.options().dtype(torch::kInt64));
+    torch::Tensor flatten_ids =
+        torch::empty({n_isects}, depths.options().dtype(torch::kInt32));
+    if (n_isects) {
+        AT_DISPATCH_FLOATING_TYPES_AND2(
+            at::ScalarType::Half,
+            at::ScalarType::BFloat16,
+            means2d.scalar_type(),
+            "isect_tiles_n_isects",
+            [&]() {
+                isect_tiles<<<
+                    (total_elems + N_THREADS - 1) / N_THREADS,
+                    N_THREADS,
+                    0,
+                    stream>>>(
+                    packed,
+                    C,
+                    N,
+                    nnz,
+                    camera_ids_ptr,
+                    gaussian_ids_ptr,
+                    reinterpret_cast<scalar_t *>(means2d.data_ptr<scalar_t>()),
+                    radii.data_ptr<int32_t>(),
+                    depths.data_ptr<scalar_t>(),
+                    cum_tiles_per_gauss.data_ptr<int64_t>(),
+                    tile_size,
+                    tile_width,
+                    tile_height,
+                    tile_n_bits,
+                    nullptr,
+                    isect_ids.data_ptr<int64_t>(),
+                    flatten_ids.data_ptr<int32_t>()
+                );
+            }
+        );
+    }
+
+    // optionally sort the Gaussians by isect_ids
+    if (n_isects && sort) {
+        torch::Tensor isect_ids_sorted = torch::empty_like(isect_ids);
+        torch::Tensor flatten_ids_sorted = torch::empty_like(flatten_ids);
+
+        // https://nvidia.github.io/cccl/cub/api/structcub_1_1DeviceRadixSort.html
+        // DoubleBuffer reduce the auxiliary memory usage from O(N+P) to O(P)
+        if (double_buffer) {
+            // Create a set of DoubleBuffers to wrap pairs of device pointers
+            cub::DoubleBuffer<int64_t> d_keys(
+                isect_ids.data_ptr<int64_t>(),
+                isect_ids_sorted.data_ptr<int64_t>()
+            );
+            cub::DoubleBuffer<int32_t> d_values(
+                flatten_ids.data_ptr<int32_t>(),
+                flatten_ids_sorted.data_ptr<int32_t>()
+            );
+            CUB_WRAPPER(
+                cub::DeviceRadixSort::SortPairs,
+                d_keys,
+                d_values,
+                n_isects,
+                0,
+                32 + tile_n_bits + cam_n_bits,
+                stream
+            );
+            switch (d_keys.selector) {
+            case 0: // sorted items are stored in isect_ids
+                isect_ids_sorted = isect_ids;
+                break;
+            case 1: // sorted items are stored in isect_ids_sorted
+                break;
+            }
+            switch (d_values.selector) {
+            case 0: // sorted items are stored in flatten_ids
+                flatten_ids_sorted = flatten_ids;
+                break;
+            case 1: // sorted items are stored in flatten_ids_sorted
+                break;
+            }
+            // printf("DoubleBuffer d_keys selector: %d\n", d_keys.selector);
+            // printf("DoubleBuffer d_values selector: %d\n",
+            // d_values.selector);
+        } else {
+            CUB_WRAPPER(
+                cub::DeviceRadixSort::SortPairs,
+                isect_ids.data_ptr<int64_t>(),
+                isect_ids_sorted.data_ptr<int64_t>(),
+                flatten_ids.data_ptr<int32_t>(),
+                flatten_ids_sorted.data_ptr<int32_t>(),
+                n_isects,
+                0,
+                32 + tile_n_bits + cam_n_bits,
+                stream
+            );
+        }
+        return std::make_tuple(
+            tiles_per_gauss, isect_ids_sorted, flatten_ids_sorted
+        );
+    } else {
+        return std::make_tuple(tiles_per_gauss, isect_ids, flatten_ids);
+    }
+}
+
+torch::Tensor isect_offset_encode_tensor(
+    const torch::Tensor &isect_ids, // [n_isects]
+    const uint32_t C,
+    const uint32_t tile_width,
+    const uint32_t tile_height
+) {
+    DEVICE_GUARD(isect_ids);
+    CHECK_INPUT(isect_ids);
+
+    uint32_t n_isects = isect_ids.size(0);
+    torch::Tensor offsets = torch::empty(
+        {C, tile_height, tile_width}, isect_ids.options().dtype(torch::kInt32)
+    );
+    if (n_isects) {
+        uint32_t n_tiles = tile_width * tile_height;
+        uint32_t tile_n_bits = (uint32_t)floor(log2(n_tiles)) + 1;
+        at::cuda::CUDAStream stream = at::cuda::getCurrentCUDAStream();
+        isect_offset_encode<<<
+            (n_isects + N_THREADS - 1) / N_THREADS,
+            N_THREADS,
+            0,
+            stream>>>(
+            n_isects,
+            isect_ids.data_ptr<int64_t>(),
+            C,
+            n_tiles,
+            tile_n_bits,
+            offsets.data_ptr<int32_t>()
+        );
+    } else {
+        offsets.fill_(0);
+    }
+    return offsets;
+}
