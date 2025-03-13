@@ -1,15 +1,9 @@
-#include "third_party/glm/glm/glm.hpp"
-#include "third_party/glm/glm/gtc/type_ptr.hpp"
-#include "types.cuh"
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <cuda_runtime_api.h>
-#include <cstdio>
-#include <iostream>
-#include <math.h>
+#ifndef MIXPLAT_CUDA_BINDINGS_H
+#define MIXPLAT_CUDA_BINDINGS_H
+
+#include <c10/cuda/CUDAGuard.h>
 #include <torch/extension.h>
 #include <tuple>
-#include <c10/cuda/CUDAGuard.h>
 
 #define N_THREADS 256
 
@@ -34,37 +28,23 @@
         func(temp_storage.get(), temp_storage_bytes, __VA_ARGS__);             \
     } while (false)
 
+namespace mixplat {
+
 /****************************************************************************
  * 3D Spherical Harmonics
  ****************************************************************************/
 
 torch::Tensor compute_3dsh_forward_tensor(
     const unsigned num_points,
-    const unsigned degree,
-    const unsigned degrees_to_use,
-    torch::Tensor &viewdirs,
-    torch::Tensor &coeffs
-);
-
-torch::Tensor compute_3dsh_fast_forward_tensor(
-    const unsigned num_points,
     const unsigned D,
     const torch::Tensor &shs,
     const torch::Tensor &dirs
 );
 
-torch::Tensor compute_3dsh_backward_tensor(
-    const unsigned num_points,
-    const unsigned degree,
-    const unsigned degrees_to_use,
-    torch::Tensor &viewdirs,
-    torch::Tensor &v_colors
-);
-
 std::tuple<
     torch::Tensor,
     torch::Tensor>
-compute_3dsh_fast_backward_tensor(
+compute_3dsh_backward_tensor(
     const unsigned num_points,
     const unsigned D,
     const torch::Tensor &shs,
@@ -328,3 +308,7 @@ torch::Tensor isect_offset_encode_tensor(
     const uint32_t tile_width,
     const uint32_t tile_height
 );
+
+}
+
+#endif // MIXPLAT_CUDA_BINDINGS_H

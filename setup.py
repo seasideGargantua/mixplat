@@ -1,6 +1,7 @@
 import glob
 import os
 import os.path as osp
+import pathlib
 import platform
 import sys
 
@@ -9,15 +10,23 @@ from setuptools import find_packages, setup
 __version__ = None
 exec(open("mixplat/version.py", "r").read())
 
+URL = "https://github.com/seasideGargantua/mixplat.git"
+
 BUILD_NO_CUDA = os.getenv("BUILD_NO_CUDA", "0") == "1"
 WITH_SYMBOLS = os.getenv("WITH_SYMBOLS", "0") == "1"
 LINE_INFO = os.getenv("LINE_INFO", "0") == "1"
+MAX_JOBS = os.getenv("MAX_JOBS")
+need_to_unset_max_jobs = False
+if not MAX_JOBS:
+    need_to_unset_max_jobs = True
+    os.environ["MAX_JOBS"] = "10"
+    print(f"Setting MAX_JOBS to {os.environ['MAX_JOBS']}")
 
 
 def get_ext():
     from torch.utils.cpp_extension import BuildExtension
 
-    return BuildExtension.with_options(no_python_abi_suffix=True, use_ninja=False)
+    return BuildExtension.with_options(no_python_abi_suffix=True, use_ninja=True)
 
 
 def get_extensions():
@@ -25,11 +34,10 @@ def get_extensions():
     from torch.__config__ import parallel_info
     from torch.utils.cpp_extension import CUDAExtension
 
-    extensions_dir = osp.join("mixplat", "cuda", "csrc")
-    sources = glob.glob(osp.join(extensions_dir, "*.cu")) + glob.glob(
-        osp.join(extensions_dir, "*.cpp")
+    extensions_dir = osp.join("mixplat", "cuda")
+    sources = glob.glob(osp.join(extensions_dir, "csrc", "*.cu")) + glob.glob(
+        osp.join(extensions_dir, "csrc", "*.cpp")
     )
-    # remove generated 'hip' files, in case of rebuilds
     sources = [path for path in sources if "hip" not in path]
 
     undef_macros = []
@@ -74,32 +82,40 @@ def get_extensions():
         undef_macros += ["__HIP_NO_HALF_CONVERSIONS__"]
     else:
         nvcc_flags += ["--expt-relaxed-constexpr"]
+
+    # GLM/Torch has spammy and very annoyingly verbose warnings that this suppresses
+    nvcc_flags += ["-diag-suppress", "20012,186"]
     extra_compile_args["nvcc"] = nvcc_flags
     if sys.platform == "win32":
         extra_compile_args["nvcc"] += ["-DWIN32_LEAN_AND_MEAN"]
 
+    current_dir = pathlib.Path(__file__).parent.resolve()
+    glm_path = osp.join(current_dir, "mixplat", "cuda", "csrc", "third_party", "glm")
+    include_dirs = [glm_path, osp.join(current_dir, "mixplat", "cuda", "include")]
+
     extension = CUDAExtension(
-        f"mixplat.csrc",
+        "mixplat.csrc",
         sources,
-        include_dirs=[osp.join(extensions_dir, "third_party", "glm")],
+        include_dirs=include_dirs,
         define_macros=define_macros,
         undef_macros=undef_macros,
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
     )
-
     return [extension]
 
 
 setup(
     name="mixplat",
     version=__version__,
-    author="seasideGargantua",
-    author_email="seasidegargantua@gmail.com",
-    description=" Python package for differentiable rasterization of mixed gaussians",
+    description=" Python package for differentiable rasterization of gaussians",
     keywords="gaussian, splatting, cuda",
-    python_requires=">=3.10",
+    url=URL,
+    download_url=f"{URL}/archive/mixplat-{__version__}.tar.gz",
+    python_requires=">=3.7",
     install_requires=[
+        "ninja",
+        "numpy",
         "jaxtyping",
         "rich>=12",
         "torch",
@@ -117,7 +133,6 @@ setup(
             "pyyaml==6.0",
             "build",
             "twine",
-            "ninja",
         ],
     },
     ext_modules=get_extensions() if not BUILD_NO_CUDA else [],
@@ -126,3 +141,7 @@ setup(
     # https://github.com/pypa/setuptools/issues/1461#issuecomment-954725244
     include_package_data=True,
 )
+
+if need_to_unset_max_jobs:
+    print("Unsetting MAX_JOBS")
+    os.environ.pop("MAX_JOBS")

@@ -1,8 +1,19 @@
-#include "third_party/glm/glm/glm.hpp"
-#include "third_party/glm/glm/gtc/type_ptr.hpp"
+#ifndef MIXPLAT_CUDA_HELPERS_CUH
+#define MIXPLAT_CUDA_HELPERS_CUH
+
+#include "glm/glm.hpp"
+#include "glm/gtc/type_ptr.hpp"
 #include "types.cuh"
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
+#include <ATen/Dispatch.h>
+#include <ATen/cuda/Atomic.cuh>
 #include <cuda_runtime.h>
 #include <iostream>
+
+namespace mixplat {
+
+namespace cg = cooperative_groups;
 
 inline __device__ void get_bbox(const float2 center, const float2 dims,
                                 const dim3 img_size, uint2 &bb_min, uint2 &bb_max) {
@@ -139,6 +150,12 @@ inline __device__ glm::mat3 quat_to_rotmat(const float4 quat) {
     float y = quat.z;
     float z = quat.w;
 
+    float inv_norm = rsqrt(x * x + y * y + z * z + w * w);
+    x *= inv_norm;
+    y *= inv_norm;
+    z *= inv_norm;
+    w *= inv_norm;
+
     // glm matrices are column-major
     return glm::mat3(
         1.f - 2.f * (y * y + z * z), 2.f * (x * y + w * z), 2.f * (x * z - w * y),
@@ -151,6 +168,12 @@ inline __device__ float4 quat_to_rotmat_vjp(const float4 quat, const glm::mat3 v
     float x = quat.y;
     float y = quat.z;
     float z = quat.w;
+
+    float inv_norm = rsqrt(x * x + y * y + z * z + w * w);
+    x *= inv_norm;
+    y *= inv_norm;
+    z *= inv_norm;
+    w *= inv_norm;
 
     float4 v_quat;
     // v_R is COLUMN MAJOR
@@ -259,6 +282,27 @@ inline __device__ void covar_world_to_cam_vjp(
     v_R += v_covar_c * R * glm::transpose(covar) +
            glm::transpose(v_covar_c) * R * covar;
     v_covar += glm::transpose(R) * v_covar_c * R;
+}
+
+template <typename T>
+inline __device__ T inverse(const mat2<T> M, mat2<T> &Minv) {
+    T det = M[0][0] * M[1][1] - M[0][1] * M[1][0];
+    if (det <= 0.f) {
+        return det;
+    }
+    T invDet = 1.f / det;
+    Minv[0][0] = M[1][1] * invDet;
+    Minv[0][1] = -M[0][1] * invDet;
+    Minv[1][0] = Minv[0][1];
+    Minv[1][1] = M[0][0] * invDet;
+    return det;
+}
+
+template <typename T>
+inline __device__ void inverse_vjp(const T Minv, const T v_Minv, T &v_M) {
+    // P = M^-1
+    // df/dM = -P * df/dP * P
+    v_M += -Minv * v_Minv * Minv;
 }
 
 template <typename T>
@@ -428,3 +472,72 @@ inline __device__ void persp_proj_vjp(
                   2.f * fx * tx * rz3 * v_J[2][0] +
                   2.f * fy * ty * rz3 * v_J[2][1];
 }
+
+template <uint32_t DIM, class T, class WarpT>
+inline __device__ void warpSum(T *val, WarpT &warp) {
+#pragma unroll
+    for (uint32_t i = 0; i < DIM; i++) {
+        val[i] = cg::reduce(warp, val[i], cg::plus<T>());
+    }
+}
+
+template <class WarpT, class ScalarT>
+inline __device__ void warpSum(ScalarT &val, WarpT &warp) {
+    val = cg::reduce(warp, val, cg::plus<ScalarT>());
+}
+
+template <class WarpT, class ScalarT>
+inline __device__ void warpSum(vec4<ScalarT> &val, WarpT &warp) {
+    val.x = cg::reduce(warp, val.x, cg::plus<ScalarT>());
+    val.y = cg::reduce(warp, val.y, cg::plus<ScalarT>());
+    val.z = cg::reduce(warp, val.z, cg::plus<ScalarT>());
+    val.w = cg::reduce(warp, val.w, cg::plus<ScalarT>());
+}
+
+template <class WarpT, class ScalarT>
+inline __device__ void warpSum(vec3<ScalarT> &val, WarpT &warp) {
+    val.x = cg::reduce(warp, val.x, cg::plus<ScalarT>());
+    val.y = cg::reduce(warp, val.y, cg::plus<ScalarT>());
+    val.z = cg::reduce(warp, val.z, cg::plus<ScalarT>());
+}
+
+template <class WarpT, class ScalarT>
+inline __device__ void warpSum(vec2<ScalarT> &val, WarpT &warp) {
+    val.x = cg::reduce(warp, val.x, cg::plus<ScalarT>());
+    val.y = cg::reduce(warp, val.y, cg::plus<ScalarT>());
+}
+
+template <class WarpT, class ScalarT>
+inline __device__ void warpSum(mat4<ScalarT> &val, WarpT &warp) {
+    warpSum(val[0], warp);
+    warpSum(val[1], warp);
+    warpSum(val[2], warp);
+    warpSum(val[3], warp);
+}
+
+template <class WarpT, class ScalarT>
+inline __device__ void warpSum(mat3<ScalarT> &val, WarpT &warp) {
+    warpSum(val[0], warp);
+    warpSum(val[1], warp);
+    warpSum(val[2], warp);
+}
+
+template <class WarpT, class ScalarT>
+inline __device__ void warpSum(mat2<ScalarT> &val, WarpT &warp) {
+    warpSum(val[0], warp);
+    warpSum(val[1], warp);
+}
+
+template <class WarpT, class ScalarT>
+inline __device__ void warpMax(ScalarT &val, WarpT &warp) {
+    val = cg::reduce(warp, val, cg::greater<ScalarT>());
+}
+
+template <typename T> __forceinline__ __device__ T sum(vec3<T> a) {
+    return a.x + a.y + a.z;
+}
+
+
+}
+
+#endif // MIXPLAT_CUDA_HELPERS_CUH

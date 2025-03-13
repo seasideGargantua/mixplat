@@ -17,11 +17,13 @@
 #define NUM_CHANNELS 3 // Default 3, RGB
 #define BLOCK_X 16
 #define BLOCK_Y 16
+#define MAX_BLOCK_SIZE ( 16 * 16 )
 
 #define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
 #define NUM_WARPS (BLOCK_SIZE/32)
 #define MY_PI 3.14159265
 
+namespace mixplat {
 // Spherical harmonics coefficients
 __device__ __constant__ float SH_C0 = 0.28209479177387814f;
 __device__ __constant__ float SH_C1 = 0.4886025119029199f;
@@ -172,5 +174,7 @@ __forceinline__ __device__ bool in_frustum(
 	}
 	return true;
 }
+
+} // namespace
 
 #endif
