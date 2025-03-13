@@ -14,6 +14,8 @@ def _make_lazy_cuda_func(name: str) -> Callable:
 rasterize_forward = _make_lazy_cuda_func("rasterize_forward")
 rasterize_backward = _make_lazy_cuda_func("rasterize_backward")
 rasterize_to_indices_in_range = _make_lazy_cuda_func("rasterize_to_indices_in_range")
+rasterize_to_pixels_fwd = _make_lazy_cuda_func("rasterize_to_pixels_fwd")
+rasterize_to_pixels_bwd = _make_lazy_cuda_func("rasterize_to_pixels_bwd")
 compute_3d_covariance_forward = _make_lazy_cuda_func("compute_3d_covariance_forward")
 compute_3d_covariance_backward = _make_lazy_cuda_func("compute_3d_covariance_backward")
 compute_4d_covariance_forward = _make_lazy_cuda_func("compute_4d_covariance_forward")

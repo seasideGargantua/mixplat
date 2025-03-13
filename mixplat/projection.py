@@ -264,10 +264,11 @@ def project_gaussians(
         - **compensation** (Tensor): the density compensation for blurring 2D kernel
         - **num_tiles_hit** (Tensor): number of tiles hit per gaussian.
     """
+    C = viewmats.size(0)
     N = means.size(0)
     assert means.size() == (N, 3), means.size()
-    assert viewmats.size() == (4, 4), viewmats.size()
-    assert Ks.size() == (3, 3), Ks.size()
+    assert viewmats.size() == (C, 4, 4), viewmats.size()
+    assert Ks.size() == (C, 3, 3), Ks.size()
     assert covars.size() == (N, 6), covars.size()
     means = means.contiguous()
     viewmats = viewmats.contiguous()
@@ -276,7 +277,7 @@ def project_gaussians(
     return _ProjectGaussians.apply(
         means,
         covars,
-        viewmat,
+        viewmats,
         Ks,
         width,
         height,
@@ -305,9 +306,9 @@ class _ProjectGaussians(torch.autograd.Function):
         radius_clip: float,
         calc_compensations: bool,
     ):
-        num_points = means3d.shape[-2]
-        if num_points < 1 or means3d.shape[-1] != 3:
-            raise ValueError(f"Invalid shape for means3d: {means3d.shape}")
+        num_points = means.shape[-2]
+        if num_points < 1 or means.shape[-1] != 3:
+            raise ValueError(f"Invalid shape for means3d: {means.shape}")
 
         radii, means2d, depths, conics, compensations = _C.project_gaussians_forward(
             means,

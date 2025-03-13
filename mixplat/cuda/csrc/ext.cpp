@@ -15,6 +15,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("rasterize_forward", &mixplat::rasterize_forward_tensor);
   m.def("rasterize_backward", &mixplat::rasterize_backward_tensor);
   m.def("rasterize_to_indices_in_range", &mixplat::rasterize_to_indices_in_range_tensor);
+  m.def("rasterize_to_pixels_fwd", &mixplat::rasterize_to_pixels_fwd_tensor);
+  m.def("rasterize_to_pixels_bwd", &mixplat::rasterize_to_pixels_bwd_tensor);
   // utils
   m.def("map_gaussian_to_intersects", &mixplat::map_gaussian_to_intersects_tensor);
   m.def("get_tile_bin_edges", &mixplat::get_tile_bin_edges_tensor);

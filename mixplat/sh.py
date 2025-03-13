@@ -66,32 +66,36 @@ class _3DSphericalHarmonics(torch.autograd.Function):
 
     @staticmethod
     def forward(
-        ctx,
-        degrees_to_use: int,
-        viewdirs,
-        coeffs,
+        ctx, degree, shs, dirs
     ):
-        num_points = coeffs.shape[0]
-        ctx.degrees_to_use = degrees_to_use
-        degree = deg_from_sh(coeffs.shape[-2])
-        ctx.degree = degree
-        ctx.save_for_backward(viewdirs)
-        return _C.spherical_harmonics_3d_forward(
-            num_points, degree, degrees_to_use, viewdirs, coeffs
+        num_points = shs.shape[0]
+        color = _C.spherical_harmonics_3d_forward(
+            num_points, 
+            degree, 
+            shs, 
+            dirs
         )
+        ctx.save_for_backward(shs, dirs)
+        ctx.num_points = num_points
+        ctx.degree = degree
+        return color
 
     @staticmethod
-    def backward(ctx, v_colors):
-        degrees_to_use = ctx.degrees_to_use
+    def backward(ctx, dL_dcolors):
+        shs, dirs = ctx.saved_tensors
+        num_points = ctx.num_points
         degree = ctx.degree
-        viewdirs = ctx.saved_tensors[0]
-        num_points = v_colors.shape[0]
+        dL_dsh, dL_ddir = _C.spherical_harmonics_3d_backward(
+                num_points,
+                degree,
+                shs,
+                dirs,
+                dL_dcolors
+            )
         return (
             None,
-            None,
-            _C.spherical_harmonics_3d_backward(
-                num_points, degree, degrees_to_use, viewdirs, v_colors
-            ),
+            dL_dsh, 
+            dL_ddir,
         )
 
 #------------------------------------------------------------#
